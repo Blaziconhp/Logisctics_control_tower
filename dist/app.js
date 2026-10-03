@@ -12,6 +12,15 @@
   const formatDate = (value, options = {}) => value ? new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: options.short ? undefined : "numeric" }).format(new Date(value)) : "Not available";
   const slugify = (value) => String(value || "export").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
+  async function boundedFetch(request, init = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error("Supabase request timed out after 60 seconds.")), 60000);
+    const abort = () => controller.abort(init.signal?.reason);
+    init.signal?.addEventListener("abort", abort, { once: true });
+    try { return await fetch(request, { ...init, signal: controller.signal }); }
+    finally { clearTimeout(timeout); init.signal?.removeEventListener("abort", abort); }
+  }
+
   const PALETTE = {
     blue: "#2f6fed",
     teal: "#0c8b75",
@@ -27,6 +36,7 @@
     performance: { kicker: "Courier intelligence", title: "Performance" },
     exceptions: { kicker: "Action queue", title: "Exceptions" },
     shipments: { kicker: "Shipment ledger", title: "Shipments" },
+    insights: { kicker: "Network intelligence", title: "Insights & suggestions" },
     studio: { kicker: "Personal analytics", title: "Custom studio" },
     sharv: { kicker: "Operations copilot", title: "Ask SHARV" }
   };
@@ -38,6 +48,7 @@
     demo: false,
     route: "overview",
     shipments: [],
+    lineItems: [],
     filtered: [],
     filters: { couriers: [], states: [], statuses: [], customers: [], from: "", to: "" },
     charts: new Map(),
@@ -106,7 +117,7 @@
     const customers = ["Aarav Retail", "Blue Mango", "Cedar & Co.", "D2C Labs", "Earthful", "Fable Street", "Good Glamm", "House of Masaba", "Inde Wild", "Jade Wellness"];
     const recipients = ["Aarav Mehta", "Ananya Rao", "Diya Kapoor", "Ishaan Verma", "Kabir Singh", "Maya Iyer", "Neha Shah", "Reyansh Das", "Sara Khan", "Vihaan Joshi"];
     const records = [];
-    const today = new Date("2026-09-28T08:00:00+05:30");
+    const today = new Date();
     for (let index = 0; index < count; index += 1) {
       const orderDate = new Date(today);
       orderDate.setDate(today.getDate() - Math.floor(random() * 125));
@@ -250,15 +261,23 @@
     const best = [...courierGroups].filter((row) => row.total >= 20).sort((a, b) => b.onTimeRate - a.onTimeRate)[0];
     const worstState = riskyStates[0];
     const multiAttempt = rows.filter((row) => row.statusGroup === "Delivered" && row.attempts > 1).length;
+    const productMovement = new Map();
+    rows.forEach((row) => (row.productItems || []).forEach((line) => {
+      const key = line.productName || line.sku || "Unspecified product";
+      const product = productMovement.get(key) || { Product: key, SKU: line.sku || "—", Units: 0, Lines: 0 };
+      product.Units += Number(line.quantity || 0); product.Lines++; productMovement.set(key, product);
+    }));
+    const topProducts = [...productMovement.values()].sort((a, b) => b.Units - a.Units).slice(0, 8);
+    const topCities = aggregateDimension(rows, "city").slice(0, 10);
 
     $("#page").innerHTML = `
-      <div class="page-intro"><div><p class="eyebrow">Today at a glance</p><h2>Network health, without the noise.</h2><p>See service performance, cost exposure, and the exceptions that need an owner under the current scope.</p></div><span class="update-stamp"><span class="live-dot"></span>Updated ${formatDate(state.dataUpdatedAt, { short: true })} · 09:42 IST</span></div>
+      <div class="page-intro"><div><p class="eyebrow">Today at a glance</p><h2>Network health, without the noise.</h2><p>See service performance, cost exposure, and the exceptions that need an owner under the current scope.</p></div><span class="update-stamp"><span class="live-dot"></span>Updated ${formatDate(state.dataUpdatedAt, { short: true })}</span></div>
       <section class="metric-grid" aria-label="Key logistics metrics">
-        ${metricCard("Total shipments", formatNumber(kpi.total), "+8.4%", "blue")}
-        ${metricCard("Delivery rate", formatPercent(kpi.deliveryRate), "+2.1 pts", "teal")}
-        ${metricCard("SLA compliance", formatPercent(kpi.onTimeRate), "+1.6 pts", kpi.onTimeRate > .8 ? "teal" : "amber")}
-        ${metricCard("RTO rate", formatPercent(kpi.rtoRate), "−0.8 pts", kpi.rtoRate < .1 ? "teal" : "red")}
-        ${metricCard("Open exceptions", formatNumber(kpi.exceptions), `${kpi.exceptions > 30 ? "+6" : "−3"}`, kpi.exceptions > 30 ? "red" : "amber", "need attention")}
+        ${metricCard("Total shipments", formatNumber(kpi.total), "Unique shipments in scope", "blue")}
+        ${metricCard("Delivery rate", formatPercent(kpi.deliveryRate), "Observed status mix", "teal")}
+        ${metricCard("SLA compliance", formatPercent(kpi.onTimeRate), "Observed vs EDD", kpi.onTimeRate > .8 ? "teal" : "amber")}
+        ${metricCard("RTO rate", formatPercent(kpi.rtoRate), "Observed status mix", kpi.rtoRate < .1 ? "teal" : "red")}
+        ${metricCard("Open exceptions", formatNumber(kpi.exceptions), "Need operational attention", kpi.exceptions > 30 ? "red" : "amber")}
       </section>
       <section class="card-grid">
         <article class="card">
@@ -319,10 +338,14 @@
     registerExport("courier", { title: "Courier SLA scorecard", type: "chart", chartId: "courierChart", rows: courierGroups.map((item) => ({ Courier: item.name, Shipments: item.total, "On-time %": item.onTimeRate * 100, "RTO %": item.rtoRate * 100, "Avg TAT": item.avgTat })), raw: rows });
     registerExport("status", { title: "Status mix", type: "chart", chartId: "statusChart", rows: statusGroups.map((item) => ({ Status: item.name, Shipments: item.value })), raw: rows });
     registerExport("exceptions", { title: "Priority exception queue", type: "table", rows: oldest, raw: oldest });
+    $("#page").insertAdjacentHTML("beforeend", '<section class="card-grid equal"><article class="card"><header class="card-head"><div><h3>Product movement · units</h3><p>Ranked by item quantity; source line detail retained</p></div>' + kebabButton("Product movement by units", "overview-products") + '</header><div class="card-body">' + (topProducts.length ? '<div class="legend-row"><span class="legend-key"><i class="legend-swatch" style="--legend-color:' + PALETTE.blue + '"></i>Units</span></div><div class="chart-wrap small"><canvas id="overviewProductChart" role="img" aria-label="Product quantities by product"></canvas></div>' : '<p class="subtle">Product/SKU and quantity columns were not found in this source.</p>') + '</div></article><article class="card table-card"><header class="card-head"><div><h3>City service performance</h3><p>Order volume, delivery, and SLA by top destinations</p></div>' + kebabButton("City service performance", "overview-cities") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>City</th><th class="right">Orders</th><th class="right">Delivered</th><th class="right">Delivery %</th><th class="right">SLA %</th></tr></thead><tbody>' + topCities.map((item) => '<tr><td>' + escapeHtml(item.name) + '</td><td class="right">' + formatNumber(item.total) + '</td><td class="right">' + formatNumber(item.delivered) + '</td><td class="right">' + formatPercent(item.deliveryRate) + '</td><td class="right">' + formatPercent(item.onTimeRate) + '</td></tr>').join('') + '</tbody></table></div></div></article></section>');
+    if (topProducts.length) createChart("overviewProductChart", { type: "bar", data: { labels: topProducts.map((item) => item.Product), datasets: [{ label: "Units", data: topProducts.map((item) => item.Units), backgroundColor: PALETTE.blue, borderRadius: 4 }] }, options: { ...chartOptions({ legend: true }), indexAxis: "y" } });
+    registerExport("overview-products", { title: "Product movement by units", type: topProducts.length ? "chart" : "table", chartId: "overviewProductChart", rows: topProducts, raw: rows });
+    registerExport("overview-cities", { title: "City service performance", type: "table", rows: topCities.map(exportAggregateRow), raw: rows });
   }
 
   function buildWeeklySeries(rows, weeks = 10) {
-    const end = new Date("2026-09-28T00:00:00+05:30");
+    const end = new Date(); end.setHours(23, 59, 59, 999);
     const buckets = Array.from({ length: weeks }, (_, reverseIndex) => {
       const index = weeks - 1 - reverseIndex;
       const start = new Date(end); start.setDate(end.getDate() - index * 7 - 6);
@@ -342,6 +365,7 @@
     courier: "Courier",
     state: "State",
     city: "City",
+    pincode: "Pincode",
     customer: "Customer account",
     warehouse: "Pickup warehouse",
     payment: "Payment type",
@@ -384,6 +408,7 @@
     if (!rows.length) return renderNoData();
     const courier = aggregateDimension(rows, "courier").sort((a, b) => b.total - a.total);
     const states = aggregateDimension(rows, "state").filter((item) => item.total >= 5).sort((a, b) => a.onTimeRate - b.onTimeRate);
+    const cities = aggregateDimension(rows, "city").sort((a, b) => b.total - a.total);
     const months = aggregateDimension(rows, "month").filter((item) => item.name !== "Unknown").sort((a, b) => a.name.localeCompare(b.name));
     const scorecard = performanceTable(rows, "courier");
     const kpi = metrics(rows);
@@ -393,9 +418,9 @@
     $("#page").innerHTML = `
       <div class="page-intro"><div><p class="eyebrow">Carrier and lane intelligence</p><h2>Measure service where it matters.</h2><p>Compare couriers, regions, and promise performance using the same scope applied across the dashboard.</p></div><div class="segmented" aria-label="Performance view"><button type="button" class="active">Couriers</button><button type="button" data-route="studio">Build another cut</button></div></div>
       <section class="metric-grid">
-        ${metricCard("SLA compliance", formatPercent(kpi.onTimeRate), "+1.6 pts", kpi.onTimeRate >= .8 ? "teal" : "amber")}
-        ${metricCard("Average TAT", `${formatNumber(kpi.avgTat, 1)}d`, "−0.3d", "teal")}
-        ${metricCard("P90 TAT", `${formatNumber(kpi.p90Tat, 1)}d`, "−0.5d", "blue")}
+        ${metricCard("SLA compliance", formatPercent(kpi.onTimeRate), "Observed vs EDD", kpi.onTimeRate >= .8 ? "teal" : "amber")}
+        ${metricCard("Average TAT", `${formatNumber(kpi.avgTat, 1)}d`, "Delivered shipments with TAT", "teal")}
+        ${metricCard("P90 TAT", `${formatNumber(kpi.p90Tat, 1)}d`, "Delivered shipment percentile", "blue")}
         ${metricCard("Best SLA courier", bestSla?.name || "—", formatPercent(bestSla?.onTimeRate), "teal", "on-time delivery")}
         ${metricCard("At-risk region", mostRisk?.name || "—", formatPercent(mostRisk?.onTimeRate), "red", "on-time delivery")}
       </section>
@@ -429,6 +454,74 @@
     registerExport("regional-risk", { title: "Regional SLA risk", type: "chart", chartId: "regionalRiskChart", rows: bottomStates.map(exportAggregateRow), raw: rows });
     registerExport("courier-scorecard", { title: "Courier scorecard", type: "table", rows: courier.map(exportAggregateRow), raw: rows });
     state.currentTable = { name: "courier-scorecard", rows: courier.map(exportAggregateRow) };
+    const cityTable = performanceTable(rows, "city");
+    const stateTable = performanceTable(rows, "state");
+    const pincodeAggregates = aggregateDimension(rows, "pincode").filter((item) => item.name && item.name !== "Unknown" && item.total >= 3).sort((a, b) => a.onTimeRate - b.onTimeRate);
+    const pincodeRows = pincodeAggregates.slice(0, 30).map(exportAggregateRow);
+    const eligiblePincodes = new Set(pincodeAggregates.map((item) => item.name));
+    const openRows = rows.filter((row) => ["In Transit", "NDR / Undelivered", "RTO In Progress"].includes(row.statusGroup)).sort((a, b) => (b.age || 0) - (a.age || 0)).slice(0, 100);
+    const attemptNames = ["Delivered · ≤1 attempt", "Delivered · multiple attempts", "RTO · after attempt", "RTO · no attempt", "Open · attempted", "Open · no attempt"];
+    const attemptRows = courier.map((item) => {
+      const scoped = rows.filter((row) => normalizeText(row.courier) === normalizeText(item.name));
+      return { Courier: item.name,
+        [attemptNames[0]]: scoped.filter((row) => row.statusGroup === "Delivered" && row.attempts <= 1).length,
+        [attemptNames[1]]: scoped.filter((row) => row.statusGroup === "Delivered" && row.attempts > 1).length,
+        [attemptNames[2]]: scoped.filter((row) => row.statusGroup.startsWith("RTO") && row.attempts > 0).length,
+        [attemptNames[3]]: scoped.filter((row) => row.statusGroup.startsWith("RTO") && row.attempts === 0).length,
+        [attemptNames[4]]: scoped.filter((row) => ["In Transit", "NDR / Undelivered"].includes(row.statusGroup) && row.attempts > 0).length,
+        [attemptNames[5]]: scoped.filter((row) => ["In Transit", "NDR / Undelivered"].includes(row.statusGroup) && row.attempts === 0).length };
+    });
+    const rtoRows = rows.filter((row) => row.statusGroup.startsWith("RTO"));
+    const rawPreview = normalizedExportRows(rows).slice(0, 40);
+    const rawColumns = rawPreview.length ? Object.keys(rawPreview[0]).slice(0, 9) : [];
+    const rtoReasons = [...groupRows(rtoRows, (row) => row.remark || row.ndrStatus || "No carrier reason recorded")].map(([Reason, items]) => ({ Reason, Orders: items.length, "Freight exposure": items.reduce((sum, row) => sum + (Number(row.freight) || 0), 0), Courier: aggregateDimension(items, "courier").sort((a, b) => b.total - a.total)[0]?.name || "—" })).sort((a, b) => b.Orders - a.Orders).slice(0, 10);
+    const monthRows = months.map((item) => ({ Month: item.name, Shipments: item.total, Delivered: item.delivered, "Delivery %": item.deliveryRate * 100, "SLA %": item.onTimeRate * 100, "RTO %": item.rtoRate * 100 }));
+    const openHtml = openRows.slice(0, 25).map((row) => '<tr><td>' + escapeHtml(row.courier) + '</td><td class="mono">' + escapeHtml(row.awb) + '</td><td class="mono">' + escapeHtml(row.orderId) + '</td><td>' + escapeHtml(row.city) + ', ' + escapeHtml(row.state) + '</td><td>' + escapeHtml(row.statusGroup) + '</td><td class="right">' + formatNumber(row.attempts) + '</td><td class="right">' + formatNumber(row.age) + 'd</td><td>' + escapeHtml(row.remark || row.ndrStatus || '—') + '</td></tr>').join('');
+    $("#page").insertAdjacentHTML("beforeend", '<section class="card-grid equal"><article class="card table-card"><header class="card-head"><div><h3>State performance</h3><p>Service and return measures by state (minimum five orders)</p></div>' + kebabButton("State performance", "state-performance") + '</header><div class="card-body">' + stateTable.html + '</div></article><article class="card table-card"><header class="card-head"><div><h3>City performance</h3><p>Service and return measures by destination city</p></div>' + kebabButton("City performance", "city-performance") + '</header><div class="card-body">' + cityTable.html + '</div></article></section><section class="card-grid equal"><article class="card table-card"><header class="card-head"><div><h3>Monthly trend detail</h3><p>Monthly count and delivery outcomes</p></div>' + kebabButton("Monthly trend detail", "month-detail") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Month</th><th class="right">Orders</th><th class="right">Delivered</th><th class="right">Delivery %</th><th class="right">SLA %</th><th class="right">RTO %</th></tr></thead><tbody>' + monthRows.map((item) => '<tr><td>' + escapeHtml(item.Month) + '</td><td class="right">' + formatNumber(item.Shipments) + '</td><td class="right">' + formatNumber(item.Delivered) + '</td><td class="right">' + formatNumber(item["Delivery %"], 1) + '%</td><td class="right">' + formatNumber(item["SLA %"], 1) + '%</td><td class="right">' + formatNumber(item["RTO %"], 1) + '%</td></tr>').join('') + '</tbody></table></div></div></article><article class="card table-card"><header class="card-head"><div><h3>Delivery attempts</h3><p>Outcome × courier attempt matrix</p></div>' + kebabButton("Delivery attempt matrix", "attempt-matrix") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Courier</th>' + attemptNames.map((name) => '<th class="right">' + escapeHtml(name) + '</th>').join('') + '</tr></thead><tbody>' + attemptRows.map((item) => '<tr><td>' + escapeHtml(item.Courier) + '</td>' + attemptNames.map((name) => '<td class="right">' + formatNumber(item[name]) + '</td>').join('') + '</tr>').join('') + '</tbody></table></div><p class="field-hint">Attempt groupings are inferred from status and attempt count supplied in the source.</p></div></article></section><section class="card-grid equal"><article class="card table-card"><header class="card-head"><div><h3>RTO analysis</h3><p>' + formatNumber(rtoRows.length) + ' return-to-origin orders in scope</p></div>' + kebabButton("RTO analysis", "rto-analysis") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Reason</th><th class="right">Orders</th><th class="right">Freight exposure</th><th>Leading courier</th></tr></thead><tbody>' + (rtoReasons.map((item) => '<tr><td>' + escapeHtml(item.Reason) + '</td><td class="right">' + formatNumber(item.Orders) + '</td><td class="right">' + formatCurrency(item["Freight exposure"]) + '</td><td>' + escapeHtml(item.Courier) + '</td></tr>').join('') || '<tr><td colspan="4">No RTO orders in this scope.</td></tr>') + '</tbody></table></div></div></article><article class="card table-card"><header class="card-head"><div><h3>Open shipment queue</h3><p>Oldest in-transit, NDR, and RTO-in-progress orders</p></div>' + kebabButton("Open shipment queue", "open-queue") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Courier</th><th>AWB</th><th>Order</th><th>Destination</th><th>Status</th><th class="right">Attempts</th><th class="right">Age</th><th>Carrier remark</th></tr></thead><tbody>' + (openHtml || '<tr><td colspan="8">No open shipments in this scope.</td></tr>') + '</tbody></table></div></div></article></section><article class="card table-card"><header class="card-head"><div><h3>Raw shipment data</h3><p>Source rows within scope, preview limited to 40; export menu downloads the complete scoped raw data</p></div>' + kebabButton("Raw shipment data", "performance-raw") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr>' + rawColumns.map((name) => '<th>' + escapeHtml(name) + '</th>').join('') + '</tr></thead><tbody>' + rawPreview.map((row) => '<tr>' + rawColumns.map((name) => '<td>' + escapeHtml(row[name] == null ? '' : String(row[name])) + '</td>').join('') + '</tr>').join('') + '</tbody></table></div></div></article>');
+    registerExport("state-performance", { title: "State performance", type: "table", rows: stateTable.data.map(exportAggregateRow), raw: rows });
+    registerExport("city-performance", { title: "City performance", type: "table", rows: cityTable.data.map(exportAggregateRow), raw: rows });
+    registerExport("month-detail", { title: "Monthly trend detail", type: "table", rows: monthRows, raw: rows });
+    registerExport("attempt-matrix", { title: "Delivery attempt matrix", type: "table", rows: attemptRows, raw: rows });
+    registerExport("rto-analysis", { title: "RTO analysis", type: "table", rows: rtoReasons, raw: rtoRows });
+    registerExport("open-queue", { title: "Open shipment queue", type: "table", rows: openRows, raw: openRows });
+    registerExport("performance-raw", { title: "Raw shipment data", type: "table", rows: rawPreview, raw: rows });
+    $("#page").insertAdjacentHTML("beforeend", '<article class="card table-card"><header class="card-head"><div><h3>Pincode performance</h3><p>Lowest observed SLA first · only pins with at least three shipments</p></div>' + kebabButton("Pincode performance", "pincode-performance") + '</header><div class="card-body"><div class="table-scroll">' + performanceTable(rows.filter((row) => eligiblePincodes.has(row.pincode)), "pincode").html + '</div></div></article>');
+    registerExport("pincode-performance", { title: "Pincode performance", type: "table", rows: pincodeRows, raw: rows });
+  }
+
+  function renderInsights() {
+    const rows = state.filtered;
+    if (!rows.length) return renderNoData();
+    const grouped = new Map();
+    rows.forEach((row) => {
+      if (!row.customerKey || row.customerClass === "Unknown") return;
+      const item = grouped.get(row.customerKey) || { Customer: row.recipientName, Address: row.customerAddress || "Not in source", rows: [] };
+      item.rows.push(row); grouped.set(row.customerKey, item);
+    });
+    const customerRows = [...grouped.values()].map((item) => {
+      const courier = aggregateDimension(item.rows, "courier").sort((a, b) => b.total - a.total)[0];
+      return { Customer: item.Customer, Address: item.Address, Orders: item.rows.length, Classification: item.rows.length > 1 ? "Repeat Customer" : "New Customer", Quantity: item.rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0), "On-time %": metrics(item.rows).onTimeRate * 100, Courier: courier?.name || "—", sourceRows: item.rows };
+    }).sort((a, b) => b.Orders - a.Orders);
+    const products = new Map();
+    rows.forEach((row) => (row.productItems || []).forEach((line) => {
+      const name = line.productName || line.sku || "Unspecified product";
+      const item = products.get(name) || { Product: name, SKU: line.sku || "—", Quantity: 0, Lines: 0 };
+      item.Quantity += Number(line.quantity || 0); item.Lines++; products.set(name, item);
+    }));
+    const productRows = [...products.values()].sort((a, b) => b.Quantity - a.Quantity);
+    const customerExport = customerRows.map(({ sourceRows, ...item }) => item);
+    const customerHtml = customerRows.slice(0, 100).map((row) => '<tr><td>' + escapeHtml(row.Customer) + '</td><td>' + escapeHtml(row.Address) + '</td><td class="right">' + formatNumber(row.Orders) + '</td><td>' + escapeHtml(row.Classification) + '</td><td class="right">' + formatNumber(row.Quantity) + '</td><td class="right">' + formatNumber(row["On-time %"], 1) + '%</td><td>' + escapeHtml(row.Courier) + '</td></tr>').join("");
+    const productHtml = productRows.slice(0, 12).map((row) => '<tr><td>' + escapeHtml(row.Product) + '</td><td>' + escapeHtml(row.SKU) + '</td><td class="right strong">' + formatNumber(row.Quantity) + '</td><td class="right">' + formatNumber(row.Lines) + '</td></tr>').join("");
+    const risks = aggregateDimension(rows, "courier").filter((item) => item.total >= 5 && item.onTimeRate < .85).sort((a, b) => a.onTimeRate - b.onTimeRate);
+    const findings = risks.length ? risks.slice(0, 3).map((item) => item.name + ': ' + formatPercent(item.onTimeRate) + ' observed on-time across ' + item.total + ' shipments; request a lane-level corrective-action plan.').join(' ') : 'No courier is below the 85% review threshold among couriers with at least five shipments in this scope.';
+    $("#page").innerHTML = '<div class="page-intro"><div><p class="eyebrow">Active-data findings</p><h2>Insights &amp; suggestions</h2><p>Calculated from the active shipment scope. Missing fields and small samples are called out rather than guessed.</p></div></div>' +
+      '<section class="metric-grid">' + metricCard("Unique customers", formatNumber(customerRows.length), "Name + address", "blue") + metricCard("Repeat customers", formatNumber(customerRows.filter((row) => row.Classification === "Repeat Customer").length), "2+ consolidated orders", "teal") + metricCard("New customers", formatNumber(customerRows.filter((row) => row.Classification === "New Customer").length), "1 observed order", "blue") + metricCard("Product units", formatNumber(rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0)), formatNumber(productRows.length) + " product groups", "amber") + metricCard("Courier reviews", formatNumber(risks.length), "SLA <85% · n≥5", risks.length ? "red" : "teal") + '</section>' +
+      '<section class="card-grid equal"><article class="card"><header class="card-head"><div><h3>Recommended action</h3><p>Evidence-led courier review</p></div></header><div class="card-body"><p>' + escapeHtml(findings) + '</p></div></article><article class="card"><header class="card-head"><div><h3>Product movement</h3><p>Ranked by units, not shipment count</p></div>' + kebabButton("Product movement", "insight-products") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Product</th><th>SKU</th><th class="right">Units</th><th class="right">Lines</th></tr></thead><tbody>' + (productHtml || '<tr><td colspan="4">No product line detail in this dataset.</td></tr>') + '</tbody></table></div></div></article></section>' +
+      '<article class="card table-card"><header class="card-head"><div><h3>Customer analytics</h3><p>Classification after order consolidation using normalized customer name + address</p></div>' + kebabButton("Customer analytics", "customer-analytics") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Customer</th><th>Address</th><th class="right">Orders</th><th>Classification</th><th class="right">Units</th><th class="right">On-time</th><th>Courier</th></tr></thead><tbody>' + (customerHtml || '<tr><td colspan="7">Customer name/address was not available in the source.</td></tr>') + '</tbody></table></div></div><footer class="table-footer"><span>' + formatNumber(customerRows.length) + ' customer identities · showing up to 100</span><span>Computed and raw line-level exports are available</span></footer></article>';
+    state.exports.clear();
+    registerExport("customer-analytics", { title: "Customer analytics", type: "table", rows: customerExport, raw: customerRows.flatMap((row) => row.sourceRows) });
+    registerExport("insight-products", { title: "Product movement", type: "table", rows: productRows, raw: rows });
+    state.currentTable = { name: "customer-analytics", rows: customerExport };
   }
 
   function exportAggregateRow(item) {
@@ -445,15 +538,30 @@
     return "Normal";
   }
 
+  function recommendedExceptionAction(row) {
+    if (row.statusGroup === "Lost / Damaged") return "Escalate carrier claim; request scan trail and proof of condition";
+    if (row.statusGroup === "NDR / Undelivered") return "Validate address/customer availability; book next attempt";
+    if (row.statusGroup.startsWith("RTO")) return "Confirm return reason and reconcile inventory/refund";
+    if ((row.age || 0) > 7) return "Escalate aged shipment with courier control tower";
+    if (row.attempts > 1) return "Review failed-attempt notes; arrange customer-confirmed reattempt";
+    return "Track next scan and contact courier if no movement";
+  }
+
   function renderExceptions() {
     const rows = exceptionRows();
     const query = state.tableQuery.trim().toLowerCase();
     const visible = (query ? rows.filter((row) => [row.awb, row.orderId, row.customer, row.recipientName, row.courier, row.city, row.state, row.statusGroup, row.remark, row.ndrStatus].some((value) => String(value || "").toLowerCase().includes(query))) : rows).sort((a, b) => (b.age || 0) - (a.age || 0));
     const high = rows.filter((row) => priorityFor(row) === "High");
-    const breach = rows.filter((row) => row.edd && new Date(row.edd) < new Date("2026-09-28T23:59:59+05:30"));
+    const today = new Date(); today.setHours(23, 59, 59, 999);
+    const breach = rows.filter((row) => row.edd && new Date(row.edd) < today && row.statusGroup !== "Delivered");
     const reattempt = rows.filter((row) => row.attempts > 1);
     const rto = rows.filter((row) => row.statusGroup.startsWith("RTO"));
     const reasons = [...groupRows(rows.filter((row) => row.remark || row.ndrStatus), (row) => row.remark || row.ndrStatus || "No reason")].map(([name, items]) => ({ name, value: items.length })).sort((a, b) => b.value - a.value).slice(0, 7);
+    const courierActions = aggregateDimension(rows, "courier").map((item) => {
+      const primaryReason = [...groupRows(item.raw.filter((row) => row.remark || row.ndrStatus), (row) => row.remark || row.ndrStatus)].map(([name, items]) => ({ name, count: items.length })).sort((a, b) => b.count - a.count)[0];
+      const sample = item.raw.sort((a, b) => (b.age || 0) - (a.age || 0))[0];
+      return { Courier: item.name, Exceptions: item.total, High: item.raw.filter((row) => priorityFor(row) === "High").length, "Most common recorded signal": primaryReason?.name || "No reason supplied", "Recommended action": sample ? recommendedExceptionAction(sample) : "Review carrier lane" };
+    }).sort((a, b) => b.Exceptions - a.Exceptions);
     const ageingLabels = ["0–2d", "3–4d", "5–7d", "8–14d", "15d+"];
     const ageing = [
       rows.filter((row) => (row.age || 0) <= 2).length,
@@ -466,10 +574,10 @@
       <div class="page-intro"><div><p class="eyebrow">Prioritized action queue</p><h2>Resolve the exceptions that move the number.</h2><p>Sorted by ageing, failed attempts, and terminal risk. Open any shipment for full context.</p></div><button class="button secondary" type="button" data-route="sharv">${icon("spark")} Ask SHARV about this queue</button></div>
       ${high.length ? `<div class="risk-banner">${icon("alert")}<div><b>${formatNumber(high.length)} high-priority shipments need an owner</b><span>${formatNumber(breach.length)} are past EDD; the oldest open item is ${formatNumber(Math.max(...rows.map((row) => row.age || 0)))} days.</span></div><button class="text-button" type="button" data-focus-table>Review queue →</button></div>` : ""}
       <section class="metric-grid">
-        ${metricCard("Open exceptions", formatNumber(rows.length), "+6", rows.length > 30 ? "red" : "amber", "vs previous period")}
+        ${metricCard("Open exceptions", formatNumber(rows.length), "In current scope", rows.length > 30 ? "red" : "amber")}
         ${metricCard("High priority", formatNumber(high.length), `${formatPercent(high.length / (rows.length || 1))}`, "red", "of exception queue")}
-        ${metricCard("Past EDD", formatNumber(breach.length), "−4", "amber", "open shipments")}
-        ${metricCard("Multiple attempts", formatNumber(reattempt.length), "+3", "amber", "need intervention")}
+        ${metricCard("Past EDD", formatNumber(breach.length), "Open shipments", "amber")}
+        ${metricCard("Multiple attempts", formatNumber(reattempt.length), "Need intervention", "amber")}
         ${metricCard("RTO in progress", formatNumber(rto.length), formatPercent(rto.length / (state.filtered.length || 1)), "red", "of scoped shipments")}
       </section>
       <section class="card-grid equal">
@@ -478,14 +586,16 @@
       </section>
       <article class="card table-card" id="exceptionTable"><header class="card-head"><div><h3>Exception worklist</h3><p>Click an AWB to inspect all available shipment context</p></div>${kebabButton("Exception worklist", "exception-worklist")}</header>
         <div class="table-tools"><label class="table-search">${icon("search")}<input id="exceptionSearch" type="search" value="${escapeHtml(state.tableQuery)}" placeholder="Search AWB, order, customer, city…" aria-label="Search exception worklist"></label><div class="table-meta">${formatNumber(visible.length)} matching · ${formatNumber(rows.length)} total exceptions</div></div>
-        <div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Priority / AWB</th><th>Order</th><th>Courier</th><th>Customer</th><th>Destination</th><th>Status</th><th class="right">Age</th><th class="right">Attempts</th><th>EDD</th><th>Reason</th></tr></thead><tbody>${visible.slice(0, 120).map((row) => `<tr><td><span class="priority ${priorityFor(row).toLowerCase()}">${priorityFor(row)}</span><br><button class="text-button mono" type="button" data-shipment="${escapeHtml(row.id)}">${escapeHtml(row.awb)}</button></td><td class="mono">${escapeHtml(row.orderId)}</td><td>${escapeHtml(row.courier)}</td><td>${escapeHtml(row.customer)}</td><td>${escapeHtml(row.city)}, ${escapeHtml(row.state)}</td><td><span class="status ${statusClass(row.statusGroup)}">${escapeHtml(row.statusGroup)}</span></td><td class="right strong">${formatNumber(row.age)}d</td><td class="right">${formatNumber(row.attempts)}</td><td>${formatDate(row.edd, { short: true })}</td><td title="${escapeHtml(row.remark || row.ndrStatus || "No carrier reason")}">${escapeHtml((row.remark || row.ndrStatus || "—").slice(0, 38))}</td></tr>`).join("") || `<tr><td colspan="10">No exceptions match this search.</td></tr>`}</tbody></table></div></div>
+        <div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Priority / AWB</th><th>Order</th><th>Courier</th><th>Customer</th><th>Destination</th><th>Status</th><th class="right">Age</th><th class="right">Attempts</th><th>EDD</th><th>Reason</th><th>Recommended next action</th></tr></thead><tbody>${visible.slice(0, 120).map((row) => `<tr><td><span class="priority ${priorityFor(row).toLowerCase()}">${priorityFor(row)}</span><br><button class="text-button mono" type="button" data-shipment="${escapeHtml(row.id)}">${escapeHtml(row.awb)}</button></td><td class="mono">${escapeHtml(row.orderId)}</td><td>${escapeHtml(row.courier)}</td><td>${escapeHtml(row.customer)}</td><td>${escapeHtml(row.city)}, ${escapeHtml(row.state)} · ${escapeHtml(row.pincode || "pin unavailable")}</td><td><span class="status ${statusClass(row.statusGroup)}">${escapeHtml(row.statusGroup)}</span></td><td class="right strong">${formatNumber(row.age)}d</td><td class="right">${formatNumber(row.attempts)}</td><td>${formatDate(row.edd, { short: true })}</td><td title="${escapeHtml(row.remark || row.ndrStatus || "No carrier reason")}">${escapeHtml((row.remark || row.ndrStatus || "—").slice(0, 38))}</td><td>${escapeHtml(recommendedExceptionAction(row))}</td></tr>`).join("") || `<tr><td colspan="11">No exceptions match this search.</td></tr>`}</tbody></table></div></div>
         <footer class="table-footer"><span>Showing up to 120 rows · exports include all ${formatNumber(visible.length)} matching rows</span><button class="text-button" type="button" data-route="shipments">Open shipment ledger →</button></footer></article>`;
 
+    $("#page").insertAdjacentHTML("beforeend", '<article class="card table-card"><header class="card-head"><div><h3>Courier action plan</h3><p>Exception volume, severity, recorded signal, and next step for each courier</p></div>' + kebabButton("Courier action plan", "courier-action-plan") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Courier</th><th class="right">Exceptions</th><th class="right">High</th><th>Most common signal</th><th>Recommended action</th></tr></thead><tbody>' + courierActions.map((item) => '<tr><td class="strong">' + escapeHtml(item.Courier) + '</td><td class="right">' + formatNumber(item.Exceptions) + '</td><td class="right">' + formatNumber(item.High) + '</td><td>' + escapeHtml(item["Most common recorded signal"]) + '</td><td>' + escapeHtml(item["Recommended action"]) + '</td></tr>').join('') + '</tbody></table></div></div></article>');
     createChart("exceptionAgeingChart", { type: "bar", data: { labels: ageingLabels, datasets: [{ label: "Exceptions", data: ageing, backgroundColor: ageingLabels.map((_, index) => index < 2 ? PALETTE.amber : PALETTE.red), borderRadius: 4, maxBarThickness: 34 }] }, options: chartOptions() });
     createChart("failureSignalsChart", { type: "bar", data: { labels: reasons.map((item) => item.name), datasets: [{ label: "Shipments", data: reasons.map((item) => item.value), backgroundColor: PALETTE.red, borderRadius: 4, maxBarThickness: 20 }] }, options: { ...chartOptions(), indexAxis: "y" } });
     state.exports.clear();
     registerExport("exception-ageing", { title: "Exception ageing", type: "chart", chartId: "exceptionAgeingChart", rows: ageingLabels.map((label, index) => ({ "Age bucket": label, Exceptions: ageing[index] })), raw: rows });
     registerExport("failure-signals", { title: "Top failure signals", type: "chart", chartId: "failureSignalsChart", rows: reasons.map((item) => ({ Reason: item.name, Shipments: item.value })), raw: rows });
+    registerExport("courier-action-plan", { title: "Courier action plan", type: "table", rows: courierActions, raw: rows });
     registerExport("exception-worklist", { title: "Exception worklist", type: "table", rows: visible, raw: visible });
     state.currentTable = { name: "exception-worklist", rows: visible };
     $("#exceptionSearch")?.addEventListener("input", debounce((event) => { state.tableQuery = event.target.value; renderExceptions(); }, 220));
@@ -795,17 +905,63 @@
     }
 
     if (/which (one|shipment)|the (first|second|third)|those|them/i.test(lower) && state.lastSharvRows.length) {
-      const relevant = /delay|late|breach/i.test(lower) ? state.lastSharvRows.filter((row) => row.statusGroup !== "Delivered" && row.edd && new Date(row.edd) < new Date("2026-09-28T23:59:59+05:30")) : state.lastSharvRows;
+      const relevant = /delay|late|breach/i.test(lower) ? state.lastSharvRows.filter((row) => row.statusGroup !== "Delivered" && row.edd && new Date(row.edd) < new Date()) : state.lastSharvRows;
       if (!relevant.length) return `<p>None of the ${state.lastSharvRows.length} shipments from the previous answer are currently past their promised date.</p>`;
       return `<p>${relevant.length} shipment${relevant.length === 1 ? " is" : "s are"} relevant to that follow-up.</p>${relevant.map((row) => shipmentResultHtml(row, row.awb)).join("")}`;
     }
 
     const dimensions = detectQuestionDimensions(question, source);
+    if (/compare/i.test(lower)) {
+      const normalizedQuestion = normalizeText(question);
+      const mentionedStates = [...new Set(source.map((row) => row.state).filter(Boolean))].filter((name) => normalizedQuestion.includes(normalizeText(name)));
+      if (mentionedStates.length >= 2) {
+        const compared = source.filter((row) => mentionedStates.includes(row.state) && (!dimensions.courier || normalizeText(row.courier) === normalizeText(dimensions.courier)));
+        return '<p>State comparison based on observed shipments' + (dimensions.courier ? ' for ' + escapeHtml(dimensions.courier) : '') + ':</p>' + miniComparisonTable(aggregateDimension(compared, "state").sort((a, b) => b.total - a.total), "State");
+      }
+    }
     let cohort = source;
     if (dimensions.courier) cohort = cohort.filter((row) => normalizeText(row.courier) === normalizeText(dimensions.courier));
     if (dimensions.state) cohort = cohort.filter((row) => normalizeText(row.state) === normalizeText(dimensions.state));
     if (dimensions.city) cohort = cohort.filter((row) => normalizeText(row.city) === normalizeText(dimensions.city));
     if (dimensions.customer) cohort = cohort.filter((row) => normalizeText(row.customer).includes(normalizeText(dimensions.customer)) || normalizeText(row.recipientName).includes(normalizeText(dimensions.customer)));
+    if (dimensions.pincode) cohort = cohort.filter((row) => String(row.pincode || "") === dimensions.pincode);
+    if (dimensions.product || /product|sku|quantity|units|movement/i.test(lower)) {
+      const productMap = new Map();
+      cohort.forEach((row) => (row.productItems || []).forEach((line) => {
+        const name = line.productName || line.sku || "Unspecified product";
+        if (dimensions.product && !normalizeText(name).includes(normalizeText(dimensions.product)) && !normalizeText(line.sku).includes(normalizeText(dimensions.product))) return;
+        const item = productMap.get(name) || { Product: name, SKU: line.sku || "—", Units: 0, Lines: 0 };
+        item.Units += Number(line.quantity || 0); item.Lines++; productMap.set(name, item);
+      }));
+      const ranked = [...productMap.values()].sort((a, b) => b.Units - a.Units).slice(0, 10);
+      if (!ranked.length) return '<p>Product/SKU line details are not available in this data slice, so I cannot calculate product movement.</p>';
+      state.lastSharvRows = cohort;
+      return '<p>Product movement for ' + escapeHtml([dimensions.city, dimensions.state, dimensions.courier].filter(Boolean).join(' · ') || scopeLabel) + ' is ranked by quantity units:</p>' + miniComparisonTable(ranked.map((item) => ({ name: item.Product + ' · ' + item.SKU, total: item.Units })), 'Product / SKU');
+    }
+    if (/repeat customer|new customer|customer count/i.test(lower)) {
+      const customerSet = new Map();
+      cohort.forEach((row) => {
+        if (!row.customerKey) return;
+        const item = customerSet.get(row.customerKey) || { orders: 0 };
+        item.orders++; customerSet.set(row.customerKey, item);
+      });
+      const repeat = [...customerSet.values()].filter((item) => item.orders > 1).length;
+      const newCount = [...customerSet.values()].filter((item) => item.orders === 1).length;
+      return '<p>In ' + escapeHtml([dimensions.state, dimensions.city].filter(Boolean).join(' · ') || scopeLabel) + ', I found <b>' + formatNumber(repeat) + ' repeat customers</b> and ' + formatNumber(newCount) + ' customers with one observed order. This uses normalized name + address and only records with both fields populated (' + formatNumber(customerSet.size) + ' identities).</p>';
+    }
+    if (/worst|lowest|risk|breach/i.test(lower) && /pincode|pin code|postal/i.test(lower)) {
+      const pins = aggregateDimension(cohort, 'pincode').filter((item) => item.name && item.name !== 'Unknown' && item.total >= 3).sort((a, b) => a.onTimeRate - b.onTimeRate);
+      if (!pins.length) return '<p>No pincode has the minimum three shipments needed for a directional performance ranking.</p>';
+      state.lastSharvRows = pins[0].raw;
+      return '<p>Lowest observed pincode SLA' + (dimensions.courier ? ' for ' + escapeHtml(dimensions.courier) : '') + ' (minimum three shipments per pin):</p>' + miniComparisonTable(pins.slice(0, 8).map((item) => ({ name: item.name, total: item.total, deliveryRate: item.deliveryRate, onTimeRate: item.onTimeRate, rtoRate: item.rtoRate, exceptions: item.exceptions })), 'Pincode');
+    }
+    if (/why.*(delay|late)|delay.*why|cause.*delay/i.test(lower)) {
+      const delayed = cohort.filter((row) => row.statusGroup !== 'Delivered' && row.edd && new Date(row.edd) < new Date());
+      if (!delayed.length) return '<p>No open shipment past its EDD was found in this slice. The source data does not support a delay-cause claim.</p>';
+      const reasons = [...groupRows(delayed.filter((row) => row.remark || row.ndrStatus), (row) => row.remark || row.ndrStatus)].map(([name, items]) => ({ name, value: items.length })).sort((a, b) => b.value - a.value).slice(0, 5);
+      const carriers = aggregateDimension(delayed, 'courier').sort((a, b) => b.total - a.total);
+      return '<p>There are <b>' + formatNumber(delayed.length) + ' open shipments past EDD</b> in this slice. ' + (carriers.length ? escapeHtml(carriers[0].name) + ' is responsible for the largest count (' + formatNumber(carriers[0].total) + '). ' : '') + 'Recorded carrier signals: ' + (reasons.length ? reasons.map((item) => escapeHtml(item.name) + ' (' + formatNumber(item.value) + ')').join(', ') : 'no delay reason was present in the source') + '.</p>';
+    }
     if (/sla|service level|on.?time|tat|turnaround|delivery time|performance/i.test(lower) && (dimensions.courier || dimensions.state || dimensions.city || dimensions.customer)) {
       state.lastSharvRows = cohort.slice(0, 50);
       return slaAnswer(cohort, dimensions, scopeLabel);
@@ -854,7 +1010,10 @@
     let stateName = find(source.map((row) => row.state));
     if (city && !stateName) stateName = source.find((row) => normalizeText(row.city) === normalizeText(city))?.state || null;
     const customer = find([...source.map((row) => row.customer), ...source.map((row) => row.recipientName)]);
-    return { courier, city, state: stateName, customer };
+    const product = find(source.flatMap((row) => (row.productItems || []).flatMap((item) => [item.productName, item.sku])));
+    const pinCandidate = question.match(/\b\d{5,6}\b/)?.[0];
+    const pincode = pinCandidate && source.some((row) => String(row.pincode || "") === pinCandidate) ? pinCandidate : null;
+    return { courier, city, state: stateName, customer, product, pincode };
   }
 
   function findPartialCustomers(question, source) {
@@ -864,7 +1023,7 @@
   }
 
   function shipmentResultHtml(row, matchedToken) {
-    const late = row.statusGroup !== "Delivered" && row.edd && new Date(row.edd) < new Date("2026-09-28T23:59:59+05:30");
+    const late = row.statusGroup !== "Delivered" && row.edd && new Date(row.edd) < new Date();
     return `<details class="shipment-result" open><summary><span class="status ${statusClass(row.statusGroup)}"></span><b>${escapeHtml(row.orderId)} · <span class="mono">${escapeHtml(row.awb)}</span></b><span class="priority ${late ? "high" : priorityFor(row).toLowerCase()}">${late ? "Late" : escapeHtml(row.statusGroup)}</span></summary><div class="result-grid">${detailField("Matched", matchedToken)}${detailField("Courier", row.courier)}${detailField("Customer", row.customer)}${detailField("Recipient", row.recipientName)}${detailField("Destination", `${row.city}, ${row.state}`)}${detailField("Status", row.status)}${detailField("Promised date", formatDate(row.edd))}${detailField("Delivered", formatDate(row.deliveredDate))}${detailField("Attempts", formatNumber(row.attempts))}${detailField("Freight", row.freight == null ? "Not in source" : formatCurrency(row.freight))}${(row.ndrStatus || row.remark) ? detailField("Carrier signal", row.ndrStatus || row.remark) : ""}</div></details>`;
   }
 
@@ -947,8 +1106,8 @@
     return source.map((row) => Object.fromEntries(Object.entries(row).filter(([, value]) => typeof value !== "object" || value instanceof Date).map(([key, value]) => [key, sanitizedCell(value)])));
   }
 
-  function downloadWorkbook(rows, filename, sheetName = "Data") {
-    const cleanRows = prepareExportRows(rows);
+  function downloadWorkbook(rows, filename, sheetName = "Data", preserveColumns = false) {
+    const cleanRows = preserveColumns ? rows.map((row) => Object.fromEntries(Object.entries(row).filter(([, value]) => typeof value !== "object" || value instanceof Date).map(([key, value]) => [key, sanitizedCell(value)]))) : prepareExportRows(rows);
     const safeName = `${slugify(filename)}-${new Date().toISOString().slice(0, 10)}`;
     if (window.XLSX) {
       const workbook = XLSX.utils.book_new();
@@ -961,6 +1120,19 @@
       downloadBlob(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }), `${safeName}.csv`);
     }
     toast("Download ready", `${formatNumber(rows.length)} row${rows.length === 1 ? "" : "s"} exported.`);
+  }
+
+  function rawExportRows(rows) {
+    const lines = rows.flatMap((row) => {
+      const original = row.rawPayload?.__lineItems;
+      if (Array.isArray(original) && original.length) return original.map((line) => ({ ...line, "Consolidated order ID": row.orderId, "Mapped AWB": row.awb, "Courier": row.courier, "Customer": row.recipientName, "Customer address": row.customerAddress || "" }));
+      return normalizedExportRows([row]);
+    });
+    return lines;
+  }
+
+  function downloadRawWorkbook(rows, filename, sheetName = "Raw data") {
+    downloadWorkbook(rawExportRows(rows), filename, sheetName, true);
   }
 
   function downloadBlob(blob, filename) {
@@ -1006,8 +1178,8 @@
     const definition = state.exports.get(context);
     if (action === "noop") { closeMenu(); return; }
     if (action === "sign-out") { signOut(); closeMenu(); return; }
-    if (action === "global-filtered") { downloadWorkbook(state.filtered, "SHARV-filtered-raw-data", "Filtered raw"); closeMenu(); return; }
-    if (action === "global-complete") { downloadWorkbook(state.shipments, "SHARV-complete-raw-data", "Complete raw"); closeMenu(); return; }
+    if (action === "global-filtered") { downloadRawWorkbook(state.filtered, "SHARV-filtered-raw-data", "Filtered raw"); closeMenu(); return; }
+    if (action === "global-complete") { downloadRawWorkbook(state.shipments, "SHARV-complete-raw-data", "Complete raw"); closeMenu(); return; }
     if (action === "global-current") {
       const rows = state.currentTable?.rows || [];
       downloadWorkbook(rows, `SHARV-${state.currentTable?.name || "current-table"}`, "Computed table"); closeMenu(); return;
@@ -1015,7 +1187,7 @@
     if (!definition) return;
     if (action === "download-image") downloadChart(definition.chartId, definition.title);
     if (action === "download-view") downloadWorkbook(definition.rows, `SHARV-${definition.title}`, definition.type === "chart" ? "Chart data" : "Computed table");
-    if (action === "download-raw") downloadWorkbook(definition.raw, `SHARV-${definition.title}-raw`, "Underlying raw");
+    if (action === "download-raw") downloadRawWorkbook(definition.raw, `SHARV-${definition.title}-raw`, "Underlying raw");
     if (action === "copy-summary") copyExportSummary(definition);
     closeMenu();
   }
@@ -1045,8 +1217,17 @@
       statuses: [...new Set(state.shipments.map((row) => row.statusGroup).filter(Boolean))].sort(),
       customers: [...new Set(state.shipments.map((row) => row.customer).filter(Boolean))].sort()
     };
-    const lists = Object.entries(options).map(([key, values]) => `<div><span class="field-label">${escapeHtml({ couriers: "Courier", states: "State", statuses: "Status", customers: "Customer" }[key])}</span><div class="multi-list">${values.map((value) => `<label class="check-row"><input type="checkbox" data-filter-key="${key}" value="${escapeHtml(value)}" ${state.filters[key].includes(value) ? "checked" : ""}> ${escapeHtml(value)}</label>`).join("") || '<span class="subtle">No values available</span>'}</div></div>`).join("");
+    const lists = Object.entries(options).map(([key, values]) => `<div><span class="field-label">${escapeHtml({ couriers: "Courier", states: "State", statuses: "Status", customers: "Customer" }[key])}</span><div class="multi-list">${values.length ? `<label class="check-row select-all-row"><input type="checkbox" data-select-all="${key}" ${values.length && values.every((value) => state.filters[key].includes(value)) ? "checked" : ""}> Select all</label>${values.map((value) => `<label class="check-row"><input type="checkbox" data-filter-key="${key}" value="${escapeHtml(value)}" ${state.filters[key].includes(value) ? "checked" : ""}> ${escapeHtml(value)}</label>`).join("")}` : '<span class="subtle">No values available</span>'}</div></div>`).join("");
     openModal(`<header class="modal-head"><div><p class="eyebrow">Global scope</p><h2 id="modalTitle">Filter dashboard data</h2><p>These selections apply to every tab, SHARV’s filtered scope, and filtered downloads.</p></div><button class="icon-button" type="button" data-close-modal aria-label="Close">${icon("close")}</button></header><div class="modal-body"><div class="filter-grid">${lists}</div><div class="builder-grid" style="margin-top:16px"><label class="field"><span>Order date from</span><input id="filterFrom" type="date" value="${escapeHtml(state.filters.from)}"></label><label class="field"><span>Order date to</span><input id="filterTo" type="date" value="${escapeHtml(state.filters.to)}"></label></div></div><footer class="modal-actions"><button class="button secondary" type="button" id="modalClearFilters">Clear all</button><button class="button primary" type="button" id="applyFilters">Apply filters</button></footer>`, true);
+    $$('[data-select-all]', $("#modal")).forEach((toggle) => toggle.addEventListener("change", () => {
+      $$(`[data-filter-key="${toggle.dataset.selectAll}"]`, $("#modal")).forEach((input) => { input.checked = toggle.checked; });
+    }));
+    $$('[data-filter-key]', $("#modal")).forEach((input) => input.addEventListener("change", () => {
+      const key = input.dataset.filterKey;
+      const all = $$(`[data-filter-key="${key}"]`, $("#modal"));
+      const toggle = $(`[data-select-all="${key}"]`, $("#modal"));
+      if (toggle) toggle.checked = all.length > 0 && all.every((item) => item.checked);
+    }));
     $("#modalClearFilters").addEventListener("click", () => { closeModal(); clearFilters(); });
     $("#applyFilters").addEventListener("click", () => {
       ["couriers", "states", "statuses", "customers"].forEach((key) => { state.filters[key] = $$(`[data-filter-key="${key}"]:checked`, $("#modal")).map((input) => input.value); });
@@ -1057,7 +1238,7 @@
 
   function openUploadModal() {
     if (state.role !== "upload_admin") { toast("Upload restricted", "Only the two primary users can add or replace shipment data.", "error"); return; }
-    openModal(`<header class="modal-head"><div><p class="eyebrow">Primary user access</p><h2 id="modalTitle">Upload shipment data</h2><p>The original file and normalized shipment rows are secured in Supabase when cloud mode is configured.</p></div><button class="icon-button" type="button" data-close-modal aria-label="Close">${icon("close")}</button></header><div class="modal-body"><label class="field"><span>Data source</span><select id="uploadSource"><option value="ITL">ITL courier export</option><option value="Blitz">Blitz courier export</option><option value="Other">Other / normalized template</option></select></label><div class="drop-zone" id="dropZone" role="button" tabindex="0">${icon("package")}<b>Drop an XLSX, XLS, or CSV file here</b><span>or click to choose a file · up to 25 MB</span></div><div id="selectedFile"></div><div class="risk-banner" style="margin:14px 0 0">${icon("check")}<div><b>Cloud access is policy-controlled</b><span>Only two UUID-based primary slots can write. All authenticated users can view and download.</span></div></div></div><footer class="modal-actions"><button class="button secondary" type="button" data-close-modal>Cancel</button><button class="button primary" type="button" id="startUpload" disabled>Validate & upload</button></footer>`);
+    openModal(`<header class="modal-head"><div><p class="eyebrow">Primary user access</p><h2 id="modalTitle">Upload shipment data</h2><p>Base Raw Data replaces the active dataset only after validation and atomic cloud finalization.</p></div><button class="icon-button" type="button" data-close-modal aria-label="Close">${icon("close")}</button></header><div class="modal-body"><label class="field"><span>Data source</span><select id="uploadSource"><option value="Base Raw Data">Base Raw Data · replace active dataset</option><option value="ITL">ITL courier export · merge</option><option value="Blitz">Blitz courier export · merge</option><option value="Other">Other / normalized template · merge</option></select></label><div class="drop-zone" id="dropZone" role="button" tabindex="0">${icon("package")}<b>Drop an XLSX, XLS, or CSV file here</b><span>or click to choose a file · up to 25 MB</span></div><div id="selectedFile"></div><div class="risk-banner" style="margin:14px 0 0">${icon("check")}<div><b>Cloud access is policy-controlled</b><span>Only two UUID-based primary slots can write. All authenticated users can view and download.</span></div></div></div><footer class="modal-actions"><button class="button secondary" type="button" data-close-modal>Cancel</button><button class="button primary" type="button" id="startUpload" disabled>Validate & upload</button></footer>`);
     const zone = $("#dropZone");
     const choose = () => $("#fileInput").click();
     zone.addEventListener("click", choose);
@@ -1116,7 +1297,7 @@
   }
 
   function normalizeUploadedRow(row, source, index) {
-    const awbRaw = readAlias(row, "awb", "awb no", "awb number", "tracking id", "tracking number", "waybill");
+    const awbRaw = readAlias(row, "awb", "awb no", "awb number", "tracking id", "tracking number", "waybill") || row.__mapped_awb;
     const orderRaw = readAlias(row, "order id", "order number", "order no", "reference id", "client order id");
     if (!awbRaw && !orderRaw) return { error: `Row ${index + 1}: AWB and order ID are both missing.` };
     const status = String(readAlias(row, "order status", "status", "shipment status", "current status") || "In Transit").trim();
@@ -1143,6 +1324,7 @@
       source, awb: String(awbRaw || orderRaw).trim(), orderId: String(orderRaw || "").trim(),
       customer: titleCase(readAlias(row, "customer account", "merchant", "brand", "account", "client", "customer brand")) || "Unassigned customer",
       recipientName: titleCase(readAlias(row, "customer name", "recipient name", "shipping name", "consignee", "buyer name")) || "Not provided",
+      customerAddress: String(readAlias(row, "customer address", "shipping address", "address", "delivery address") || "").trim(),
       courier: titleCase(readAlias(row, "courier company", "courier", "carrier", "logistics partner")) || source,
       city, state: titleCase(readAlias(row, "customer state", "shipping state", "state", "destination state")) || fallbackStates[city] || "Unknown",
       pincode: String(readAlias(row, "customer pincode", "shipping pincode", "shipping_pincode", "pincode", "postal code", "zip") || "").replace(/\.0$/, ""),
@@ -1155,6 +1337,10 @@
       freight: Number.isFinite(freightRaw) && freightRaw >= 0 ? freightRaw : null,
       ndrStatus: String(readAlias(row, "ndr status", "ndr", "delivery exception") || ""), remark,
       onTime: deliveredDate && edd ? new Date(deliveredDate) <= new Date(edd) : null,
+      productName: String(readAlias(row, "product name", "product", "item name", "description", "product title") || "").trim(),
+      sku: String(readAlias(row, "sku", "product sku", "seller sku", "item sku") || "").trim(),
+      quantity: Math.max(0, Number(readAlias(row, "quantity", "qty", "item quantity", "units")) || 0),
+      customerAddress: String(readAlias(row, "customer address", "shipping address", "address", "delivery address") || "").trim(),
       uploadBatch: null, rawPayload: row
     } };
   }
@@ -1163,6 +1349,7 @@
     if (!window.XLSX) throw new Error("The workbook reader did not load. Check your connection and try again.");
     const workbook = XLSX.read(await file.arrayBuffer(), { cellDates: true, dense: false });
     const accepted = [];
+    const rawLines = [];
     const rejected = [];
     for (const sheetName of workbook.SheetNames) {
       const matrix = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, raw: true, defval: "" });
@@ -1172,14 +1359,38 @@
       matrix.slice(headerIndex + 1).forEach((cells, rowIndex) => {
         if (!cells.some((cell) => String(cell).trim())) return;
         const raw = Object.fromEntries(headers.map((header, columnIndex) => [header, cells[columnIndex]]));
-        const normalized = normalizeUploadedRow(raw, source, rowIndex + headerIndex + 1);
-        if (normalized.error) rejected.push(normalized.error); else accepted.push(normalized.value);
+        rawLines.push({ ...raw, __sourceSheet: sheetName, __sourceRow: rowIndex + headerIndex + 2 });
       });
     }
-    if (!accepted.length) throw new Error(rejected[0] || "No rows with an AWB or order ID were found. Check the workbook headers.");
-    const deduped = new Map();
-    accepted.forEach((row) => deduped.set(`${row.source}::${row.awb}`, row));
-    return { rows: [...deduped.values()], rejected, duplicates: accepted.length - deduped.size };
+    const orderAwbs = new Map();
+    rawLines.forEach((line) => {
+      const order = normalizeText(readAlias(line, "order id", "order number", "order no", "reference id", "client order id"));
+      const awb = String(readAlias(line, "awb", "awb no", "awb number", "tracking id", "tracking number", "waybill") || "").trim();
+      if (order && awb && !orderAwbs.has(order)) orderAwbs.set(order, awb);
+    });
+    const groups = new Map();
+    let acceptedLineCount = 0;
+    rawLines.forEach((line) => {
+      const order = String(readAlias(line, "order id", "order number", "order no", "reference id", "client order id") || "").trim();
+      const orderKey = normalizeText(order);
+      const normalized = normalizeUploadedRow({ ...line, __mapped_awb: orderAwbs.get(orderKey) || "" }, source, Number(line.__sourceRow || 1));
+      if (normalized.error) { rejected.push(normalized.error); return; }
+      acceptedLineCount++;
+      const row = normalized.value;
+      const key = `${normalizeText(row.orderId || row.awb)}::${normalizeText(row.awb)}`;
+      const group = groups.get(key);
+      const rawRecord = Object.fromEntries(Object.entries(line).filter(([name]) => !name.startsWith("__")));
+      if (!group) groups.set(key, { ...row, productItems: [], rawPayload: { ...row.rawPayload, __lineItems: [] } });
+      const target = groups.get(key);
+      target.productItems.push({ productName: row.productName, sku: row.sku, quantity: row.quantity });
+      target.rawPayload.__lineItems.push(rawRecord);
+      target.quantity = (target.quantity || 0) + row.quantity;
+      if (row.productName || row.sku) target.products = [...new Set([...(target.products || []), row.productName || row.sku])];
+    });
+    if (!groups.size) throw new Error(rejected[0] || "No rows with an AWB or order ID were found. Check the workbook headers.");
+    const rows = classifyCustomerOrders([...groups.values()]);
+    const duplicateOrders = acceptedLineCount - rows.length;
+    return { rows, rawLines, rejected, duplicates: duplicateOrders };
   }
 
   function toDbShipment(row, batchId = null) {
@@ -1197,17 +1408,37 @@
   }
 
   function fromDbShipment(row) {
-    return {
+    const sourceLines = row.raw_payload?.__lineItems || [];
+    const productItems = sourceLines.map((line) => ({ productName: readAlias(line, "product name", "product", "item name", "description", "product title") || "", sku: readAlias(line, "sku", "product sku", "seller sku", "item sku") || "", quantity: Number(readAlias(line, "quantity", "qty", "item quantity", "units")) || 0 }));
+    return classifyCustomerOrders([{
       id: row.id, source: row.source_system, awb: String(row.awb), orderId: String(row.order_id || ""),
       customer: row.customer_account || "Unassigned customer", recipientName: row.recipient_name || "Not provided",
+      customerAddress: readAlias(sourceLines[0] || row.raw_payload || {}, "customer address", "shipping address", "address", "delivery address") || "",
       courier: row.courier || row.source_system, city: row.city || "Unknown", state: row.state || "Unknown", pincode: row.pincode || "",
       warehouse: row.warehouse || "Unknown", payment: row.payment_type || "Unknown", mode: row.transport_mode || "Surface",
       direction: row.direction || "Forward", status: row.status || "In Transit", statusGroup: row.status_group || classifyStatus(row.status, row.remark),
       orderDate: row.order_date, pickupDate: row.pickup_date, deliveredDate: row.delivered_date, edd: row.edd,
       tat: row.tat_days == null ? null : Number(row.tat_days), serviceTarget: row.sla_target_days == null ? null : Number(row.sla_target_days),
       age: row.ageing_days == null ? null : Number(row.ageing_days), attempts: Number(row.attempts || 0), freight: row.freight_inr == null ? null : Number(row.freight_inr),
-      ndrStatus: row.ndr_status || "", remark: row.remark || "", onTime: row.on_time, uploadBatch: row.upload_batch_id, rawPayload: row.raw_payload
-    };
+      ndrStatus: row.ndr_status || "", remark: row.remark || "", onTime: row.on_time, uploadBatch: row.upload_batch_id, rawPayload: row.raw_payload,
+      productItems, quantity: productItems.reduce((sum, item) => sum + item.quantity, 0), products: [...new Set(productItems.map((item) => item.productName || item.sku).filter(Boolean))]
+    }])[0];
+  }
+
+  function classifyCustomerOrders(rows) {
+    const groups = new Map();
+    rows.forEach((row) => {
+      const address = row.customerAddress || readAlias(row.rawPayload || {}, "customer address", "shipping address", "address", "delivery address") || "";
+      const key = row.recipientName && address ? normalizeText(`${row.recipientName} ${address}`) : "";
+      row.customerKey = key;
+      if (!key || key.includes("not provided")) { row.customerClass = "Unknown"; return; }
+      groups.set(key, [...(groups.get(key) || []), row]);
+    });
+    groups.forEach((items) => {
+      items.sort((a, b) => new Date(a.orderDate || 0) - new Date(b.orderDate || 0));
+      items.forEach((row, index) => { row.customerClass = index === 0 ? "New Customer" : "Repeat Customer"; });
+    });
+    return rows;
   }
 
   async function processUpload() {
@@ -1218,30 +1449,71 @@
       const source = $("#uploadSource")?.value || "ITL";
       const result = await parseWorkbook(state.uploadFile, source);
       if (state.demo) {
+        if (source === "Base Raw Data") {
+          state.shipments = classifyCustomerOrders(result.rows.map((row) => ({ ...row, uploadBatch: `Demo upload · ${state.uploadFile.name}` })));
+          applyFilters(); closeModal(); renderRoute();
+          toast("Base Raw Data replaced", `${formatNumber(result.rows.length)} consolidated orders now define the active demo dataset.`);
+          return;
+        }
         const map = new Map(state.shipments.map((row) => [`${row.source}::${row.awb}`, row]));
         result.rows.forEach((row) => map.set(`${row.source}::${row.awb}`, { ...row, uploadBatch: `Demo upload · ${state.uploadFile.name}` }));
         state.shipments = [...map.values()]; state.dataUpdatedAt = new Date(); applyFilters(); closeModal(); renderRoute();
         toast("Upload complete", `${formatNumber(result.rows.length)} accepted, ${formatNumber(result.duplicates)} duplicate${result.duplicates === 1 ? "" : "s"} replaced, ${formatNumber(result.rejected.length)} rejected.`);
         return;
       }
-      button.textContent = "Saving to secure cloud…";
+      let oldBasePaths = [];
+      let staleRawFileWarning = false;
+      if (source === "Base Raw Data") {
+        const { data: oldBatches, error: oldBatchError } = await state.supabase.from("upload_batches").select("object_path").eq("source_system", "Base Raw Data").eq("status", "completed");
+        if (oldBatchError) throw new Error("Could not verify the active Base Raw Data version before replacement: " + oldBatchError.message);
+        oldBasePaths = (oldBatches || []).map((item) => item.object_path).filter(Boolean);
+      }
+      button.textContent = "Saving original file…";
       const { data: batch, error: batchError } = await state.supabase.from("upload_batches").insert({ source_system: source, original_filename: state.uploadFile.name, file_size_bytes: state.uploadFile.size, status: "processing", uploaded_by: state.user.id }).select().single();
       if (batchError) throw batchError;
       const safeFilename = state.uploadFile.name.replace(/[^a-zA-Z0-9._-]+/g, "-");
       const objectPath = `${state.user.id}/${batch.id}/${safeFilename}`;
       const { error: storageError } = await state.supabase.storage.from("raw-uploads").upload(objectPath, state.uploadFile, { upsert: false, contentType: state.uploadFile.type || "application/octet-stream" });
       if (storageError) throw storageError;
-      for (let index = 0; index < result.rows.length; index += 500) {
-        const chunk = result.rows.slice(index, index + 500).map((row) => toDbShipment(row, batch.id));
-        const { error } = await state.supabase.from("shipments").upsert(chunk, { onConflict: "source_system,awb" });
+      if (source === "Base Raw Data") {
+        button.textContent = "Staging replacement data…";
+        for (let index = 0; index < result.rows.length; index += 300) {
+          const chunk = result.rows.slice(index, index + 300).map((row) => toDbShipment(row, batch.id));
+          const { error } = await state.supabase.rpc("stage_shipment_upload", { p_batch_id: batch.id, p_rows: chunk });
+          if (error) throw new Error(`Base Raw Data replacement needs the current Supabase upload migration: ${error.message}`);
+          button.textContent = `Staging ${Math.min(index + 300, result.rows.length)} of ${result.rows.length}…`;
+        }
+        button.textContent = "Finalizing replacement…";
+        const { error } = await state.supabase.rpc("finalize_base_raw_upload", { p_batch_id: batch.id, p_accepted: result.rows.length, p_rejected: result.rejected.length, p_duplicates: result.duplicates, p_object_path: objectPath });
+        if (error) throw new Error(`Base Raw Data could not be atomically replaced: ${error.message}`);
+        if (oldBasePaths.length) {
+          const { error: removeError } = await state.supabase.storage.from("raw-uploads").remove(oldBasePaths);
+          if (removeError) { staleRawFileWarning = true; console.warn("Base dataset replaced, but an older private source file could not be purged", removeError); }
+        }
+        state.shipments = result.rows.map((row) => ({ ...row, uploadBatch: batch.id }));
+      } else {
+        for (let index = 0; index < result.rows.length; index += 500) {
+          const chunk = result.rows.slice(index, index + 500).map((row) => toDbShipment(row, batch.id));
+          const { error } = await state.supabase.from("shipments").upsert(chunk, { onConflict: "source_system,awb" });
+          if (error) throw error;
+          button.textContent = `Saving ${Math.min(index + 500, result.rows.length)} of ${result.rows.length}…`;
+        }
+        button.textContent = "Finalizing upload…";
+        const { error } = await state.supabase.from("upload_batches").update({ status: "completed", object_path: objectPath, accepted_rows: result.rows.length, rejected_rows: result.rejected.length, duplicate_rows: result.duplicates, completed_at: new Date().toISOString(), error_summary: result.rejected.slice(0, 50) }).eq("id", batch.id);
         if (error) throw error;
-        button.textContent = `Saving ${Math.min(index + 500, result.rows.length)} of ${result.rows.length}…`;
+        const map = new Map(state.shipments.map((row) => [`${row.source}::${row.awb}`, row]));
+        result.rows.forEach((row) => map.set(`${row.source}::${row.awb}`, { ...row, uploadBatch: batch.id }));
+        state.shipments = classifyCustomerOrders([...map.values()]);
       }
-      await state.supabase.from("upload_batches").update({ status: "completed", object_path: objectPath, accepted_rows: result.rows.length, rejected_rows: result.rejected.length, duplicate_rows: result.duplicates, completed_at: new Date().toISOString(), error_summary: result.rejected.slice(0, 50) }).eq("id", batch.id);
-      await loadCloudState(); closeModal(); renderRoute();
-      toast("Cloud data refreshed", `${formatNumber(result.rows.length)} rows accepted. Everyone with access can now analyse and download them.`);
+      state.dataUpdatedAt = new Date(); applyFilters(); closeModal(); renderRoute();
+      toast("Upload complete", `${formatNumber(result.rows.length)} consolidated shipments saved; ${formatNumber(result.rawLines.length)} source lines retained. Refreshing shared data in the background.`);
+      if (staleRawFileWarning) toast("Prior source file cleanup needs review", "The new Base Raw Data is active, but Supabase did not remove every previous file. Review private raw-uploads storage.", "error");
+      loadCloudState().then(() => renderRoute()).catch((refreshError) => {
+        console.warn("Upload succeeded; dashboard refresh is pending", refreshError);
+        toast("Upload saved", "The upload completed. Shared data refresh is still pending; reload the page if the latest rows do not appear.", "error");
+      });
     } catch (error) {
-      console.error(error); button.disabled = false; button.textContent = "Validate & upload";
+      console.error(error); if (button?.isConnected) { button.disabled = false; button.textContent = "Validate & upload"; }
       toast("Upload failed", error.message || "The workbook could not be processed.", "error");
     }
   }
@@ -1253,12 +1525,12 @@
     state.role = accessRow?.is_upload_admin ? "upload_admin" : "viewer";
     const rows = [];
     for (let offset = 0; ; offset += 1000) {
-      const { data, error } = await state.supabase.from("shipments").select("*").order("order_date", { ascending: false }).order("id", { ascending: true }).range(offset, offset + 999);
+      const { data, error } = await state.supabase.from("shipments").select("id,source_system,awb,order_id,customer_account,recipient_name,courier,city,state,pincode,warehouse,payment_type,transport_mode,direction,status,status_group,order_date,pickup_date,delivered_date,edd,tat_days,sla_target_days,ageing_days,attempts,freight_inr,ndr_status,remark,on_time,upload_batch_id,raw_payload").order("order_date", { ascending: false }).order("id", { ascending: true }).range(offset, offset + 999);
       if (error) throw error;
       rows.push(...data.map(fromDbShipment));
       if (data.length < 1000) break;
     }
-    state.shipments = rows;
+    state.shipments = classifyCustomerOrders(rows);
     const [{ data: views, error: viewsError }, { data: rules, error: rulesError }, { data: batches }] = await Promise.all([
       state.supabase.from("saved_views").select("id,name,definition,is_default,updated_at").order("updated_at", { ascending: false }),
       state.supabase.from("sla_rules").select("*").eq("active", true),
@@ -1390,6 +1662,7 @@
     else if (state.route === "performance") renderPerformance();
     else if (state.route === "exceptions") renderExceptions();
     else if (state.route === "shipments") renderShipments();
+    else if (state.route === "insights") renderInsights();
     else if (state.route === "studio") renderStudio();
     else if (state.route === "sharv") renderSharv();
     else renderPlaceholder(state.route);
@@ -1488,7 +1761,7 @@
 
   async function boot() {
     setupEvents();
-    state.dataUpdatedAt = new Date("2026-09-28T09:42:00+05:30");
+    state.dataUpdatedAt = new Date();
     const hasSupabaseConfig = Boolean(CONFIG.supabaseUrl && CONFIG.supabaseAnonKey);
     if (!hasSupabaseConfig) {
       state.demo = true;
@@ -1512,7 +1785,7 @@
       $("#authError").textContent = "The secure sign-in service could not load. Check your connection and try again.";
       return;
     }
-    state.supabase = window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabaseAnonKey);
+    state.supabase = window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabaseAnonKey, { global: { fetch: boundedFetch } });
     const { data } = await state.supabase.auth.getSession();
     if (!data.session) {
       $("#authScreen").hidden = false;

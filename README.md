@@ -5,7 +5,7 @@ SHARV is a professional logistics analytics workspace for shipment monitoring, c
 ## What is included
 
 - Professional, responsive control-tower UI with a compact operations sidebar
-- Overview, Performance, Exceptions, Shipments, Custom Studio, and SHARV workspaces
+- Overview, Performance, Exceptions, Shipments, Insights & Suggestions, Custom Studio, and SHARV workspaces
 - Multi-value shipment questions using AWBs and order IDs, including pasted comma/newline lists
 - Customer/recipient searches and courier + city/state/customer SLA questions
 - Current-scope filters that remain active across dashboards, SHARV, and downloads
@@ -38,9 +38,10 @@ Useful SHARV demo queries:
 
 1. Create a Supabase project.
 2. In Supabase SQL Editor, run [`supabase/schema.sql`](supabase/schema.sql).
-3. In Authentication settings, disable public sign-up. Invite the approved users manually.
-4. At the bottom of `supabase/schema.sql`, replace the two example emails and run the two slot-assignment statements. Those two UUID-backed slots are the only identities that can upload or mutate shipment/SLA data.
-5. Copy `config.example.js` to `config.js` and set the project URL and browser-safe publishable/anon key:
+3. Then run [`supabase/base_raw_upload.sql`](supabase/base_raw_upload.sql). This adds restricted upload staging and an administrator-only transactional finalizer. Base Raw Data replacement is not enabled until this migration has been applied.
+4. In Authentication settings, disable public sign-up. Invite the approved users manually.
+5. At the bottom of `supabase/schema.sql`, replace the two example emails and run the two slot-assignment statements. Those two UUID-backed slots are the only identities that can upload or mutate shipment/SLA data.
+6. Copy `config.example.js` to `config.js` and set the project URL and browser-safe publishable/anon key:
 
    ```js
    window.SHARV_CONFIG = {
@@ -65,12 +66,15 @@ Custom Studio stores only a declarative view definition in `saved_views` (dimens
 SHARV recognizes common aliases for:
 
 - AWB/tracking/waybill and order ID
-- courier, customer account/merchant/brand, recipient/customer name
+- courier, customer account/merchant/brand, recipient/customer name and address
+- product name, SKU, and quantity
 - order, pickup, EDD, and delivered dates
 - city, state, pincode, and warehouse
 - status, NDR, RTO reason, attempts, ageing, freight, SLA target, payment, and transport mode
 
 Rows must contain an AWB or order ID. Long IDs and leading zeroes are preserved as text in exports.
+
+Each workbook row is retained as a source line. Rows with the same normalized Order ID + mapped AWB are consolidated into one shipment before dashboard metrics and customer new/repeat classification are calculated. Raw exports flatten the retained source line items; computed tables export their exact summarized result. Choose **Base Raw Data** to stage a replacement and atomically swap the active dataset only after all staged rows validate. Other courier exports merge by source/AWB.
 
 ## Files
 
@@ -79,6 +83,7 @@ Rows must contain an AWB or order ID. Long IDs and leading zeroes are preserved 
 - `app.js` — analytics, SHARV, uploads, exports, custom views, and Supabase client integration
 - `config.js` — browser-safe environment configuration
 - `supabase/schema.sql` — database, storage bucket, exactly-two-admin model, and RLS policies
+- `supabase/base_raw_upload.sql` — locked staging + atomic Base Raw Data replacement RPCs
 - `dist/` — static deployment output generated from the same files
 
 ## Security notes
