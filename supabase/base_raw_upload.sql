@@ -84,7 +84,7 @@ begin
 
   -- Both changes occur in this transaction: any constraint failure preserves
   -- the previous live dataset and leaves this upload uncommitted.
-  delete from public.shipments;
+  truncate table public.shipments;
   insert into public.shipments (
     source_system, awb, order_id, customer_account, recipient_name, courier,
     city, state, pincode, warehouse, payment_type, transport_mode, direction,
