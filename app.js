@@ -503,12 +503,20 @@
       return { Customer: item.Customer, Address: item.Address, Orders: item.rows.length, Classification: item.rows.length > 1 ? "Repeat Customer" : "New Customer", Quantity: item.rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0), "On-time %": metrics(item.rows).onTimeRate * 100, Courier: courier?.name || "—", sourceRows: item.rows };
     }).sort((a, b) => b.Orders - a.Orders);
     const products = new Map();
+    const productGeo = new Map();
     rows.forEach((row) => (row.productItems || []).forEach((line) => {
       const name = line.productName || line.sku || "Unspecified product";
       const item = products.get(name) || { Product: name, SKU: line.sku || "—", Quantity: 0, Lines: 0 };
       item.Quantity += Number(line.quantity || 0); item.Lines++; products.set(name, item);
+      [[row.city, "City"], [row.state, "State"]].forEach(([place, level]) => {
+        if (!place || place === "Unknown") return;
+        const key = name + " · " + place;
+        const geo = productGeo.get(key) || { Product: name, Geography: place, Level: level, Units: 0, Lines: 0 };
+        geo.Units += Number(line.quantity || 0); geo.Lines++; productGeo.set(key, geo);
+      });
     }));
     const productRows = [...products.values()].sort((a, b) => b.Quantity - a.Quantity);
+    const geoRows = [...productGeo.values()].sort((a, b) => b.Units - a.Units).slice(0, 20);
     const customerExport = customerRows.map(({ sourceRows, ...item }) => item);
     const customerHtml = customerRows.slice(0, 100).map((row) => '<tr><td>' + escapeHtml(row.Customer) + '</td><td>' + escapeHtml(row.Address) + '</td><td class="right">' + formatNumber(row.Orders) + '</td><td>' + escapeHtml(row.Classification) + '</td><td class="right">' + formatNumber(row.Quantity) + '</td><td class="right">' + formatNumber(row["On-time %"], 1) + '%</td><td>' + escapeHtml(row.Courier) + '</td></tr>').join("");
     const productHtml = productRows.slice(0, 12).map((row) => '<tr><td>' + escapeHtml(row.Product) + '</td><td>' + escapeHtml(row.SKU) + '</td><td class="right strong">' + formatNumber(row.Quantity) + '</td><td class="right">' + formatNumber(row.Lines) + '</td></tr>').join("");
@@ -516,11 +524,12 @@
     const findings = risks.length ? risks.slice(0, 3).map((item) => item.name + ': ' + formatPercent(item.onTimeRate) + ' observed on-time across ' + item.total + ' shipments; request a lane-level corrective-action plan.').join(' ') : 'No courier is below the 85% review threshold among couriers with at least five shipments in this scope.';
     $("#page").innerHTML = '<div class="page-intro"><div><p class="eyebrow">Active-data findings</p><h2>Insights &amp; suggestions</h2><p>Calculated from the active shipment scope. Missing fields and small samples are called out rather than guessed.</p></div></div>' +
       '<section class="metric-grid">' + metricCard("Unique customers", formatNumber(customerRows.length), "Name + address", "blue") + metricCard("Repeat customers", formatNumber(customerRows.filter((row) => row.Classification === "Repeat Customer").length), "2+ consolidated orders", "teal") + metricCard("New customers", formatNumber(customerRows.filter((row) => row.Classification === "New Customer").length), "1 observed order", "blue") + metricCard("Product units", formatNumber(rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0)), formatNumber(productRows.length) + " product groups", "amber") + metricCard("Courier reviews", formatNumber(risks.length), "SLA <85% · n≥5", risks.length ? "red" : "teal") + '</section>' +
-      '<section class="card-grid equal"><article class="card"><header class="card-head"><div><h3>Recommended action</h3><p>Evidence-led courier review</p></div></header><div class="card-body"><p>' + escapeHtml(findings) + '</p></div></article><article class="card"><header class="card-head"><div><h3>Product movement</h3><p>Ranked by units, not shipment count</p></div>' + kebabButton("Product movement", "insight-products") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Product</th><th>SKU</th><th class="right">Units</th><th class="right">Lines</th></tr></thead><tbody>' + (productHtml || '<tr><td colspan="4">No product line detail in this dataset.</td></tr>') + '</tbody></table></div></div></article></section>' +
+      '<section class="card-grid equal"><article class="card"><header class="card-head"><div><h3>Recommended action</h3><p>Evidence-led courier review</p></div></header><div class="card-body"><p>' + escapeHtml(findings) + '</p></div></article><article class="card"><header class="card-head"><div><h3>Product movement</h3><p>Ranked by units, not shipment count</p></div>' + kebabButton("Product movement", "insight-products") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Product</th><th>SKU</th><th class="right">Units</th><th class="right">Lines</th></tr></thead><tbody>' + (productHtml || '<tr><td colspan="4">No product line detail in this dataset.</td></tr>') + '</tbody></table></div><h4>Product × city/state</h4><div class="table-scroll"><table class="data-table"><thead><tr><th>Level</th><th>Product</th><th>Geography</th><th class="right">Units</th></tr></thead><tbody>' + (geoRows.map((item) => '<tr><td>' + escapeHtml(item.Level) + '</td><td>' + escapeHtml(item.Product) + '</td><td>' + escapeHtml(item.Geography) + '</td><td class="right">' + formatNumber(item.Units) + '</td></tr>').join('') || '<tr><td colspan="4">Product geography is unavailable without product quantity fields.</td></tr>') + '</tbody></table></div></div></article></section>' +
       '<article class="card table-card"><header class="card-head"><div><h3>Customer analytics</h3><p>Classification after order consolidation using normalized customer name + address</p></div>' + kebabButton("Customer analytics", "customer-analytics") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Customer</th><th>Address</th><th class="right">Orders</th><th>Classification</th><th class="right">Units</th><th class="right">On-time</th><th>Courier</th></tr></thead><tbody>' + (customerHtml || '<tr><td colspan="7">Customer name/address was not available in the source.</td></tr>') + '</tbody></table></div></div><footer class="table-footer"><span>' + formatNumber(customerRows.length) + ' customer identities · showing up to 100</span><span>Computed and raw line-level exports are available</span></footer></article>';
     state.exports.clear();
     registerExport("customer-analytics", { title: "Customer analytics", type: "table", rows: customerExport, raw: customerRows.flatMap((row) => row.sourceRows) });
     registerExport("insight-products", { title: "Product movement", type: "table", rows: productRows, raw: rows });
+    registerExport("product-geography", { title: "Product movement by city and state", type: "table", rows: geoRows, raw: rows });
     state.currentTable = { name: "customer-analytics", rows: customerExport };
   }
 
@@ -1444,6 +1453,8 @@
   async function processUpload() {
     if (!state.uploadFile) return;
     const button = $("#startUpload");
+    let committedRows = null;
+    let committedBatchId = null;
     button.disabled = true; button.textContent = "Validating workbook…";
     try {
       const source = $("#uploadSource")?.value || "ITL";
@@ -1488,8 +1499,10 @@
         if (error) throw new Error(`Base Raw Data could not be atomically replaced: ${error.message}`);
         if (oldBasePaths.length) {
           const { error: removeError } = await state.supabase.storage.from("raw-uploads").remove(oldBasePaths);
-          if (removeError) { staleRawFileWarning = true; console.warn("Base dataset replaced, but an older private source file could not be purged", removeError); }
+        if (removeError) { staleRawFileWarning = true; console.warn("Base dataset replaced, but an older private source file could not be purged", removeError); }
         }
+        committedRows = result.rows;
+        committedBatchId = batch.id;
         state.shipments = result.rows.map((row) => ({ ...row, uploadBatch: batch.id }));
       } else {
         for (let index = 0; index < result.rows.length; index += 500) {
@@ -1498,6 +1511,8 @@
           if (error) throw error;
           button.textContent = `Saving ${Math.min(index + 500, result.rows.length)} of ${result.rows.length}…`;
         }
+        committedRows = result.rows;
+        committedBatchId = batch.id;
         button.textContent = "Finalizing upload…";
         const { error } = await state.supabase.from("upload_batches").update({ status: "completed", object_path: objectPath, accepted_rows: result.rows.length, rejected_rows: result.rejected.length, duplicate_rows: result.duplicates, completed_at: new Date().toISOString(), error_summary: result.rejected.slice(0, 50) }).eq("id", batch.id);
         if (error) throw error;
@@ -1514,6 +1529,14 @@
       });
     } catch (error) {
       console.error(error); if (button?.isConnected) { button.disabled = false; button.textContent = "Validate & upload"; }
+      if (committedRows) {
+        const map = new Map(state.shipments.map((row) => [`${row.source}::${row.awb}`, row]));
+        committedRows.forEach((row) => map.set(`${row.source}::${row.awb}`, { ...row, uploadBatch: committedBatchId }));
+        state.shipments = classifyCustomerOrders([...map.values()]); state.dataUpdatedAt = new Date(); applyFilters(); closeModal(); renderRoute();
+        toast("Shipment rows saved", "All shipment rows were written, but upload metadata did not finish. The dashboard is refreshed locally; reload to verify shared data before retrying.");
+        loadCloudState().then(() => renderRoute()).catch((refreshError) => console.warn("Post-upload refresh pending", refreshError));
+        return;
+      }
       toast("Upload failed", error.message || "The workbook could not be processed.", "error");
     }
   }
