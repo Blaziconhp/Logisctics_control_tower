@@ -30,6 +30,12 @@
     lightBlue: "#9bb7f4",
     lightTeal: "#8ac9bc"
   };
+  const SLACK_SHAREABLE_TABLES = new Set([
+    "exceptions", "overview-products", "overview-cities", "courier-scorecard", "state-performance", "city-performance",
+    "month-detail", "attempt-matrix", "rto-analysis", "open-queue", "performance-raw", "pincode-performance",
+    "customer-analytics", "insight-products", "product-geography", "courier-action-plan", "exception-worklist", "shipment-ledger",
+    "perf-courier", "perf-state", "perf-city", "perf-month", "perf-attempts", "perf-rto-courier", "perf-rto-reasons", "perf-open"
+  ]);
 
   const ROUTES = {
     overview: { kicker: "Network operations", title: "Control tower overview" },
@@ -47,6 +53,7 @@
     role: "viewer",
     demo: false,
     route: "overview",
+    performanceTab: "courier",
     shipments: [],
     lineItems: [],
     filtered: [],
@@ -180,12 +187,12 @@
     const rto = rows.filter((row) => row.statusGroup.startsWith("RTO"));
     const open = rows.filter((row) => ["In Transit", "NDR / Undelivered", "RTO In Progress"].includes(row.statusGroup));
     const exception = rows.filter((row) => row.statusGroup !== "Delivered" && row.statusGroup !== "Cancelled" && ((row.age || 0) > 4 || row.attempts > 1 || ["Lost / Damaged", "NDR / Undelivered"].includes(row.statusGroup)));
-    const withSla = delivered.filter((row) => row.onTime !== null);
+    const withSla = delivered.map((row) => ({ row, onTime: shipmentOnTime(row) })).filter((item) => item.onTime !== null);
     const tatus = delivered.map((row) => row.tat).filter(Number.isFinite);
     return {
       total: rows.length, delivered: delivered.length, deliveryRate: delivered.length / (rows.length || 1),
       rto: rto.length, rtoRate: rto.length / (rows.length || 1), open: open.length, exceptions: exception.length,
-      onTimeRate: withSla.filter((row) => row.onTime).length / (withSla.length || 1),
+      onTimeRate: withSla.length ? withSla.filter((item) => item.onTime).length / withSla.length : null,
       slaCoverage: withSla.length / (delivered.length || 1), avgTat: tatus.length ? tatus.reduce((a, b) => a + b, 0) / tatus.length : null,
       p90Tat: percentile(tatus, .9), freight: rows.reduce((sum, row) => sum + (Number(row.freight) || 0), 0)
     };
@@ -256,9 +263,9 @@
     if (!rows.length) return renderNoData();
     const courierGroups = [...groupRows(rows, "courier")].map(([name, items]) => ({ name, rows: items, ...metrics(items) })).sort((a, b) => b.total - a.total);
     const statusGroups = [...groupRows(rows, "statusGroup")].map(([name, items]) => ({ name, value: items.length })).sort((a, b) => b.value - a.value);
-    const riskyStates = [...groupRows(rows, "state")].map(([name, items]) => ({ name, ...metrics(items) })).filter((row) => row.total >= 12).sort((a, b) => a.onTimeRate - b.onTimeRate);
+    const riskyStates = [...groupRows(rows, "state")].map(([name, items]) => ({ name, ...metrics(items) })).filter((row) => row.total >= 12 && row.onTimeRate != null).sort((a, b) => a.onTimeRate - b.onTimeRate);
     const oldest = rows.filter((row) => row.age).sort((a, b) => b.age - a.age).slice(0, 6);
-    const best = [...courierGroups].filter((row) => row.total >= 20).sort((a, b) => b.onTimeRate - a.onTimeRate)[0];
+    const best = [...courierGroups].filter((row) => row.total >= 20 && row.onTimeRate != null).sort((a, b) => b.onTimeRate - a.onTimeRate)[0];
     const worstState = riskyStates[0];
     const multiAttempt = rows.filter((row) => row.statusGroup === "Delivered" && row.attempts > 1).length;
     const productMovement = new Map();
@@ -275,7 +282,7 @@
       <section class="metric-grid" aria-label="Key logistics metrics">
         ${metricCard("Total shipments", formatNumber(kpi.total), "Unique shipments in scope", "blue")}
         ${metricCard("Delivery rate", formatPercent(kpi.deliveryRate), "Observed status mix", "teal")}
-        ${metricCard("SLA compliance", formatPercent(kpi.onTimeRate), "Observed vs EDD", kpi.onTimeRate > .8 ? "teal" : "amber")}
+        ${metricCard("SLA compliance", formatPercent(kpi.onTimeRate), kpi.onTimeRate == null ? "Requires EDD or SLA target" : `Coverage ${formatPercent(kpi.slaCoverage)}`, kpi.onTimeRate == null ? "amber" : kpi.onTimeRate > .8 ? "teal" : "amber")}
         ${metricCard("RTO rate", formatPercent(kpi.rtoRate), "Observed status mix", kpi.rtoRate < .1 ? "teal" : "red")}
         ${metricCard("Open exceptions", formatNumber(kpi.exceptions), "Need operational attention", kpi.exceptions > 30 ? "red" : "amber")}
       </section>
@@ -288,8 +295,8 @@
         <article class="card">
           <header class="card-head"><div><h3>SHARV insights</h3><p>Prioritized from the current data scope</p></div><span class="sharv-spark">${icon("spark")}</span></header>
           <div class="card-body"><ul class="insight-list">
-            ${insightRow("opportunity", `${best?.name || "Top courier"} leads on SLA`, `${formatPercent(best?.onTimeRate)} on-time across ${formatNumber(best?.total)} shipments.`, "performance")}
-            ${insightRow("risk", `${worstState?.name || "Regional"} performance needs review`, `On-time delivery is ${formatPercent(worstState?.onTimeRate)} with ${formatNumber(worstState?.exceptions)} flagged exceptions.`, "exceptions")}
+            ${best ? insightRow("opportunity", `${best.name} leads on SLA`, `${formatPercent(best.onTimeRate)} on-time across ${formatNumber(best.total)} shipments.`, "performance") : insightRow("watch", "SLA data is unavailable", "Add EDD dates or configure lane SLA targets to compare promise performance.", "performance")}
+            ${worstState ? insightRow("risk", `${worstState.name} performance needs review`, `On-time delivery is ${formatPercent(worstState.onTimeRate)} with ${formatNumber(worstState.exceptions)} flagged exceptions.`, "exceptions") : ""}
             ${insightRow("watch", `${formatNumber(multiAttempt)} multi-attempt deliveries`, `${formatPercent(multiAttempt / (kpi.delivered || 1))} of delivered orders required more than one attempt.`, "exceptions")}
           </ul></div>
         </article>
@@ -323,7 +330,7 @@
     createChart("courierChart", {
       type: "bar",
       data: { labels: courierGroups.map((item) => item.name), datasets: [
-        { label: "On-time %", data: courierGroups.map((item) => item.onTimeRate * 100), backgroundColor: PALETTE.teal, borderRadius: 4, maxBarThickness: 19 },
+        { label: "On-time %", data: courierGroups.map((item) => item.onTimeRate == null ? null : item.onTimeRate * 100), backgroundColor: PALETTE.teal, borderRadius: 4, maxBarThickness: 19 },
         { label: "RTO %", data: courierGroups.map((item) => item.rtoRate * 100), backgroundColor: PALETTE.red, borderRadius: 4, maxBarThickness: 19 }
       ] }, options: chartOptions({ percent: true, legend: true })
     });
@@ -335,7 +342,7 @@
     state.currentTable = { name: "priority-exception-queue", rows: oldest };
     state.exports.clear();
     registerExport("flow", { title: "Shipment flow", type: "chart", chartId: "shipmentFlowChart", rows: weekly.labels.map((week, index) => ({ Week: week, Delivered: weekly.delivered[index], Open: weekly.open[index], "RTO / exceptions": weekly.exceptions[index] })), raw: rows });
-    registerExport("courier", { title: "Courier SLA scorecard", type: "chart", chartId: "courierChart", rows: courierGroups.map((item) => ({ Courier: item.name, Shipments: item.total, "On-time %": item.onTimeRate * 100, "RTO %": item.rtoRate * 100, "Avg TAT": item.avgTat })), raw: rows });
+    registerExport("courier", { title: "Courier SLA scorecard", type: "chart", chartId: "courierChart", rows: courierGroups.map((item) => ({ Courier: item.name, Shipments: item.total, "On-time %": item.onTimeRate == null ? null : item.onTimeRate * 100, "RTO %": item.rtoRate * 100, "Avg TAT": item.avgTat })), raw: rows });
     registerExport("status", { title: "Status mix", type: "chart", chartId: "statusChart", rows: statusGroups.map((item) => ({ Status: item.name, Shipments: item.value })), raw: rows });
     registerExport("exceptions", { title: "Priority exception queue", type: "table", rows: oldest, raw: oldest });
     $("#page").insertAdjacentHTML("beforeend", '<section class="card-grid equal"><article class="card"><header class="card-head"><div><h3>Product movement · units</h3><p>Ranked by item quantity; source line detail retained</p></div>' + kebabButton("Product movement by units", "overview-products") + '</header><div class="card-body">' + (topProducts.length ? '<div class="legend-row"><span class="legend-key"><i class="legend-swatch" style="--legend-color:' + PALETTE.blue + '"></i>Units</span></div><div class="chart-wrap small"><canvas id="overviewProductChart" role="img" aria-label="Product quantities by product"></canvas></div>' : '<p class="subtle">Product/SKU and quantity columns were not found in this source.</p>') + '</div></article><article class="card table-card"><header class="card-head"><div><h3>City service performance</h3><p>Order volume, delivery, and SLA by top destinations</p></div>' + kebabButton("City service performance", "overview-cities") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>City</th><th class="right">Orders</th><th class="right">Delivered</th><th class="right">Delivery %</th><th class="right">SLA %</th></tr></thead><tbody>' + topCities.map((item) => '<tr><td>' + escapeHtml(item.name) + '</td><td class="right">' + formatNumber(item.total) + '</td><td class="right">' + formatNumber(item.delivered) + '</td><td class="right">' + formatPercent(item.deliveryRate) + '</td><td class="right">' + formatPercent(item.onTimeRate) + '</td></tr>').join('') + '</tbody></table></div></div></article></section>');
@@ -403,7 +410,7 @@
     return { data, html: `<div class="table-scroll"><table class="data-table"><thead><tr><th>${escapeHtml(DIMENSIONS[dimension] || dimension)}</th><th class="right">Shipments</th><th class="right">Delivered</th><th class="right">Delivery %</th><th class="right">SLA %</th><th class="right">RTO %</th><th class="right">Avg TAT</th><th class="right">P90 TAT</th><th class="right">Exceptions</th></tr></thead><tbody>${data.map((item) => `<tr><td class="strong">${escapeHtml(item.name)}</td><td class="right">${formatNumber(item.total)}</td><td class="right">${formatNumber(item.delivered)}</td><td class="right">${formatPercent(item.deliveryRate)}</td><td class="right"><span class="status ${item.onTimeRate >= .84 ? "good" : item.onTimeRate >= .7 ? "warn" : "bad"}">${formatPercent(item.onTimeRate)}</span></td><td class="right">${formatPercent(item.rtoRate)}</td><td class="right">${formatNumber(item.avgTat, 1)}d</td><td class="right">${formatNumber(item.p90Tat, 1)}d</td><td class="right strong">${formatNumber(item.exceptions)}</td></tr>`).join("")}</tbody></table></div>` };
   }
 
-  function renderPerformance() {
+  function renderPerformanceLegacy() {
     const rows = state.filtered;
     if (!rows.length) return renderNoData();
     const courier = aggregateDimension(rows, "courier").sort((a, b) => b.total - a.total);
@@ -489,6 +496,105 @@
     registerExport("pincode-performance", { title: "Pincode performance", type: "table", rows: pincodeRows, raw: rows });
   }
 
+  function renderPerformance() {
+    const rows = state.filtered;
+    if (!rows.length) return renderNoData();
+    const tabs = [
+      ["courier", "Courier"], ["state", "State"], ["month", "Monthly trend"],
+      ["attempts", "Attempts"], ["rto", "RTO"], ["open", "Open queue"]
+    ];
+    if (!tabs.some(([key]) => key === state.performanceTab)) state.performanceTab = "courier";
+    const courier = aggregateDimension(rows, "courier").sort((a, b) => b.total - a.total);
+    const stateRows = aggregateDimension(rows, "state").sort((a, b) => a.onTimeRate == null ? 1 : b.onTimeRate == null ? -1 : a.onTimeRate - b.onTimeRate);
+    const cityRows = aggregateDimension(rows, "city").sort((a, b) => b.total - a.total);
+    const months = aggregateDimension(rows, "month").filter((item) => item.name !== "Unknown").sort((a, b) => a.name.localeCompare(b.name));
+    const kpi = metrics(rows);
+    const deliveredByDate = rows.filter((row) => row.statusGroup === "Delivered" && row.deliveredDate).length;
+    const bestSla = courier.filter((item) => item.onTimeRate != null).sort((a, b) => b.onTimeRate - a.onTimeRate)[0];
+    const atRiskState = stateRows.find((item) => item.total >= 5 && item.onTimeRate != null);
+    const openRows = rows.filter((row) => ["In Transit", "NDR / Undelivered", "RTO In Progress"].includes(row.statusGroup)).sort((a, b) => (b.age || 0) - (a.age || 0));
+    const rtoRows = rows.filter((row) => row.statusGroup.startsWith("RTO"));
+    const rtoReasons = [...groupRows(rtoRows, (row) => row.remark || row.ndrStatus || "No carrier reason recorded")]
+      .map(([Reason, items]) => ({ Reason, Orders: items.length, "Freight exposure": items.reduce((sum, row) => sum + (Number(row.freight) || 0), 0), Courier: aggregateDimension(items, "courier").sort((a, b) => b.total - a.total)[0]?.name || "—" }))
+      .sort((a, b) => b.Orders - a.Orders);
+    const attemptNames = ["Delivered · 1 or fewer", "Delivered · multiple", "RTO · attempted", "RTO · no attempt", "Open · attempted", "Open · no attempt"];
+    const attemptRows = courier.map((item) => {
+      const scoped = rows.filter((row) => normalizeText(row.courier) === normalizeText(item.name));
+      return { Courier: item.name,
+        [attemptNames[0]]: scoped.filter((row) => row.statusGroup === "Delivered" && row.attempts <= 1).length,
+        [attemptNames[1]]: scoped.filter((row) => row.statusGroup === "Delivered" && row.attempts > 1).length,
+        [attemptNames[2]]: scoped.filter((row) => row.statusGroup.startsWith("RTO") && row.attempts > 0).length,
+        [attemptNames[3]]: scoped.filter((row) => row.statusGroup.startsWith("RTO") && row.attempts === 0).length,
+        [attemptNames[4]]: scoped.filter((row) => ["In Transit", "NDR / Undelivered"].includes(row.statusGroup) && row.attempts > 0).length,
+        [attemptNames[5]]: scoped.filter((row) => ["In Transit", "NDR / Undelivered"].includes(row.statusGroup) && row.attempts === 0).length };
+    });
+    const monthRows = months.map((item) => ({ Month: item.name, Shipments: item.total, Delivered: item.delivered, "Delivery %": item.deliveryRate * 100, "SLA %": item.onTimeRate == null ? null : item.onTimeRate * 100, "RTO %": item.rtoRate * 100 }));
+
+    state.exports.clear();
+    const exportTable = (key, title, tableRows, rawRows = rows) => registerExport(key, { title, type: "table", rows: tableRows, raw: rawRows });
+    const tableCard = (title, key, description, columns, tableRows, rawRows, cell) => {
+      exportTable(key, title, tableRows, rawRows);
+      return `<article class="card table-card"><header class="card-head"><div><h3>${escapeHtml(title)}</h3><p>${escapeHtml(description)}</p></div>${kebabButton(title, key)}</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr>${columns.map((column) => `<th class="${column.right ? "right" : ""}">${escapeHtml(column.label)}</th>`).join("")}</tr></thead><tbody>${tableRows.length ? tableRows.map((row) => `<tr>${columns.map((column) => `<td class="${column.right ? "right" : ""} ${column.strong ? "strong" : ""}">${cell ? cell(row, column) : escapeHtml(row[column.key] == null ? "—" : row[column.key])}</td>`).join("")}</tr>`).join("") : `<tr><td colspan="${columns.length}">No rows in this scope.</td></tr>`}</tbody></table></div></div><footer class="table-footer"><span>${formatNumber(tableRows.length)} rows in this view</span><span>Search this table or use its options menu</span></footer></article>`;
+    };
+    const performanceColumns = [
+      { key: "Group", label: "Group", strong: true }, { key: "Shipments", label: "Shipments", right: true },
+      { key: "Delivered", label: "Delivered", right: true }, { key: "Delivery %", label: "Delivery %", right: true },
+      { key: "SLA %", label: "SLA %", right: true }, { key: "RTO %", label: "RTO %", right: true },
+      { key: "Average TAT", label: "Average TAT", right: true }, { key: "P90 TAT", label: "P90 TAT", right: true },
+      { key: "Exceptions", label: "Exceptions", right: true }
+    ];
+    const renderPerformanceCell = (item, column) => {
+      if (["Delivery %", "SLA %", "RTO %"].includes(column.key)) return formatPercent(item[column.key] == null ? null : item[column.key] / 100);
+      if (["Average TAT", "P90 TAT"].includes(column.key)) return `${formatNumber(item[column.key], 1)}${item[column.key] == null ? "" : " d"}`;
+      if (column.key === "Group") return escapeHtml(item.Group);
+      return formatNumber(item[column.key]);
+    };
+    const renderPerformanceRows = (dimensionRows) => dimensionRows.map((item) => ({
+      Group: item.name, Shipments: item.total, Delivered: item.delivered,
+      "Delivery %": item.deliveryRate == null ? null : item.deliveryRate * 100,
+      "SLA %": item.onTimeRate == null ? null : item.onTimeRate * 100,
+      "RTO %": item.rtoRate == null ? null : item.rtoRate * 100,
+      "Average TAT": item.avgTat, "P90 TAT": item.p90Tat, Exceptions: item.exceptions
+    }));
+    const selectedTab = state.performanceTab;
+    let content = "";
+    if (selectedTab === "courier") {
+      const courierRows = renderPerformanceRows(courier);
+      content = `<section class="card-grid equal"><article class="card"><header class="card-head"><div><h3>Courier delivery outcomes</h3><p>Delivered, RTO, and open shipments</p></div></header><div class="card-body"><div class="chart-wrap"><canvas id="performanceCourierChart" role="img" aria-label="Courier delivery outcomes"></canvas></div></div></article>${tableCard("Courier scorecard", "perf-courier", "Service measures for couriers in the current scope", performanceColumns, courierRows, rows, renderPerformanceCell)}</section>`;
+      createChart("performanceCourierChart", { type: "bar", data: { labels: courier.map((item) => item.name), datasets: [
+        { label: "Delivered", data: courier.map((item) => item.delivered), backgroundColor: PALETTE.teal, borderRadius: 4 },
+        { label: "RTO", data: courier.map((item) => item.rto), backgroundColor: PALETTE.red, borderRadius: 4 },
+        { label: "Open", data: courier.map((item) => item.open), backgroundColor: PALETTE.amber, borderRadius: 4 }
+      ] }, options: { ...chartOptions({ legend: true }), scales: { ...chartOptions({ legend: true }).scales, x: { ...chartOptions().scales.x, stacked: true }, y: { ...chartOptions().scales.y, stacked: true } } } });
+    } else if (selectedTab === "state") {
+      content = `<section class="card-grid equal">${tableCard("State performance", "perf-state", "Service outcomes by destination state", performanceColumns, renderPerformanceRows(stateRows), rows, renderPerformanceCell)}${tableCard("City performance", "perf-city", "Service outcomes by destination city", performanceColumns, renderPerformanceRows(cityRows), rows, renderPerformanceCell)}</section>`;
+    } else if (selectedTab === "month") {
+      content = `<section class="card-grid equal"><article class="card"><header class="card-head"><div><h3>Monthly delivery trend</h3><p>Order month, delivery, and RTO rate</p></div></header><div class="card-body"><div class="chart-wrap"><canvas id="performanceMonthChart" role="img" aria-label="Monthly delivery trend"></canvas></div></div></article>${tableCard("Monthly trend detail", "perf-month", "Orders are grouped by order date month", [{ key: "Month", label: "Month" }, { key: "Shipments", label: "Shipments", right: true }, { key: "Delivered", label: "Delivered", right: true }, { key: "Delivery %", label: "Delivery %", right: true }, { key: "SLA %", label: "SLA %", right: true }, { key: "RTO %", label: "RTO %", right: true }], monthRows, rows, (item, column) => column.key.endsWith("%") ? formatPercent(item[column.key] == null ? null : item[column.key] / 100) : escapeHtml(item[column.key] == null ? "—" : item[column.key]))}</section>`;
+      createChart("performanceMonthChart", { type: "line", data: { labels: months.map((item) => item.name), datasets: [
+        { label: "Delivery %", data: months.map((item) => item.deliveryRate * 100), borderColor: PALETTE.blue, backgroundColor: PALETTE.blue, tension: .3 },
+        { label: "SLA %", data: months.map((item) => item.onTimeRate == null ? null : item.onTimeRate * 100), borderColor: PALETTE.teal, backgroundColor: PALETTE.teal, tension: .3, spanGaps: false },
+        { label: "RTO %", data: months.map((item) => item.rtoRate * 100), borderColor: PALETTE.red, backgroundColor: PALETTE.red, tension: .3 }
+      ] }, options: chartOptions({ percent: true, legend: true }) });
+    } else if (selectedTab === "attempts") {
+      content = tableCard("Delivery attempts", "perf-attempts", "Shipment counts by courier, outcome, and supplied attempt count", [{ key: "Courier", label: "Courier", strong: true }, ...attemptNames.map((name) => ({ key: name, label: name, right: true }))], attemptRows, rows, (item, column) => formatNumber(item[column.key]));
+    } else if (selectedTab === "rto") {
+      const rtoByCourier = aggregateDimension(rtoRows, "courier").map((item) => ({ Courier: item.name, Orders: item.total, "RTO % of network": item.total / (rows.length || 1) * 100, "Freight exposure": item.freight, "Avg attempts": item.raw.length ? item.raw.reduce((sum, row) => sum + (row.attempts || 0), 0) / item.raw.length : 0 }));
+      content = `<section class="card-grid equal">${tableCard("RTO by courier", "perf-rto-courier", "Return-to-origin shipments and recorded freight", [{ key: "Courier", label: "Courier", strong: true }, { key: "Orders", label: "Orders", right: true }, { key: "RTO % of network", label: "RTO % of network", right: true }, { key: "Freight exposure", label: "Freight exposure", right: true }, { key: "Avg attempts", label: "Avg attempts", right: true }], rtoByCourier, rtoRows, (item, column) => column.key.includes("%") ? formatPercent(item[column.key] / 100) : column.key === "Freight exposure" ? formatCurrency(item[column.key]) : column.key === "Avg attempts" ? formatNumber(item[column.key], 1) : column.key === "Orders" ? formatNumber(item[column.key]) : escapeHtml(item[column.key] == null ? "—" : item[column.key]))}${tableCard("RTO reason analysis", "perf-rto-reasons", "Grouped by the source remark or NDR signal", [{ key: "Reason", label: "Reason" }, { key: "Orders", label: "Orders", right: true }, { key: "Freight exposure", label: "Freight exposure", right: true }, { key: "Courier", label: "Leading courier" }], rtoReasons, rtoRows, (item, column) => column.key === "Orders" ? formatNumber(item[column.key]) : column.key === "Freight exposure" ? formatCurrency(item[column.key]) : escapeHtml(item[column.key] == null ? "—" : item[column.key]))}</section>`;
+    } else {
+      const openTableRows = openRows.map((row) => ({ Courier: row.courier, AWB: row.awb, "Order ID": row.orderId, Destination: `${row.city}, ${row.state}`, Status: row.statusGroup, Attempts: row.attempts, "Age (days)": row.age, "Carrier remark": row.remark || row.ndrStatus || "—" }));
+      content = tableCard("Open shipment queue", "perf-open", "Oldest in-transit, NDR, and RTO-in-progress shipments", [{ key: "Courier", label: "Courier" }, { key: "AWB", label: "AWB" }, { key: "Order ID", label: "Order ID" }, { key: "Destination", label: "Destination" }, { key: "Status", label: "Status" }, { key: "Attempts", label: "Attempts", right: true }, { key: "Age (days)", label: "Age (days)", right: true }, { key: "Carrier remark", label: "Carrier remark" }], openTableRows, openRows, (item, column) => column.right ? formatNumber(item[column.key]) : escapeHtml(item[column.key] == null ? "—" : item[column.key]));
+    }
+
+    const slaCoverage = kpi.slaCoverage == null ? "Unavailable" : formatPercent(kpi.slaCoverage);
+    const slaValue = kpi.onTimeRate == null ? "Unavailable" : formatPercent(kpi.onTimeRate);
+    const tabMarkup = tabs.map(([key, label]) => `<button type="button" role="tab" aria-selected="${selectedTab === key}" class="${selectedTab === key ? "active" : ""}" data-performance-tab="${key}">${label}</button>`).join("");
+    const slaNotice = kpi.onTimeRate == null ? `<div class="inline-notice">SLA compliance is unavailable for this data. ${formatNumber(deliveredByDate)} delivered shipments have no EDD or configured SLA target. Transit-time analysis remains available.</div>` : `<div class="inline-notice">SLA coverage is ${slaCoverage} of delivered shipments. Compliance uses a supplied EDD or an active matching SLA rule.</div>`;
+    $("#page").innerHTML = `<div class="page-intro"><div><p class="eyebrow">Carrier and lane intelligence</p><h2>Performance</h2><p>Choose a focused view. Each tab follows the active dashboard filters.</p></div><button class="button secondary" type="button" data-route="studio">Build another cut</button></div>
+      <section class="metric-grid">${metricCard("Shipments", formatNumber(kpi.total), "Current filtered scope", "blue")}${metricCard("Delivered", formatNumber(kpi.delivered), formatPercent(kpi.deliveryRate), "teal", "of shipment rows")}${metricCard("SLA compliance", slaValue, kpi.onTimeRate == null ? "Requires EDD or SLA target" : `Coverage ${slaCoverage}`, kpi.onTimeRate == null ? "amber" : "teal")}${metricCard("RTO rate", formatPercent(kpi.rtoRate), `${formatNumber(kpi.rto)} return shipments`, kpi.rtoRate > .1 ? "red" : "teal")}</section>
+      ${slaNotice}<div class="performance-tabs" role="tablist" aria-label="Performance views">${tabMarkup}</div><section class="performance-panel" role="tabpanel">${content}</section>`;
+    state.currentTable = { name: selectedTab, rows: state.exports.values().next().value?.rows || [] };
+  }
+
   function renderInsights() {
     const rows = state.filtered;
     if (!rows.length) return renderNoData();
@@ -500,7 +606,8 @@
     });
     const customerRows = [...grouped.values()].map((item) => {
       const courier = aggregateDimension(item.rows, "courier").sort((a, b) => b.total - a.total)[0];
-      return { Customer: item.Customer, Address: item.Address, Orders: item.rows.length, Classification: item.rows.length > 1 ? "Repeat Customer" : "New Customer", Quantity: item.rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0), "On-time %": metrics(item.rows).onTimeRate * 100, Courier: courier?.name || "—", sourceRows: item.rows };
+      const slaRate = metrics(item.rows).onTimeRate;
+      return { Customer: item.Customer, Address: item.Address, Orders: item.rows.length, Classification: item.rows.length > 1 ? "Repeat Customer" : "New Customer", Quantity: item.rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0), "On-time %": slaRate == null ? null : slaRate * 100, Courier: courier?.name || "—", sourceRows: item.rows };
     }).sort((a, b) => b.Orders - a.Orders);
     const products = new Map();
     const productGeo = new Map();
@@ -518,14 +625,16 @@
     const productRows = [...products.values()].sort((a, b) => b.Quantity - a.Quantity);
     const geoRows = [...productGeo.values()].sort((a, b) => b.Units - a.Units).slice(0, 20);
     const customerExport = customerRows.map(({ sourceRows, ...item }) => item);
-    const customerHtml = customerRows.slice(0, 100).map((row) => '<tr><td>' + escapeHtml(row.Customer) + '</td><td>' + escapeHtml(row.Address) + '</td><td class="right">' + formatNumber(row.Orders) + '</td><td>' + escapeHtml(row.Classification) + '</td><td class="right">' + formatNumber(row.Quantity) + '</td><td class="right">' + formatNumber(row["On-time %"], 1) + '%</td><td>' + escapeHtml(row.Courier) + '</td></tr>').join("");
+    const customerHtml = customerRows.slice(0, 100).map((row) => '<tr><td>' + escapeHtml(row.Customer) + '</td><td>' + escapeHtml(row.Address) + '</td><td class="right">' + formatNumber(row.Orders) + '</td><td>' + escapeHtml(row.Classification) + '</td><td class="right">' + formatNumber(row.Quantity) + '</td><td class="right">' + (row["On-time %"] == null ? "—" : formatNumber(row["On-time %"], 1) + '%') + '</td><td>' + escapeHtml(row.Courier) + '</td></tr>').join("");
     const productHtml = productRows.slice(0, 12).map((row) => '<tr><td>' + escapeHtml(row.Product) + '</td><td>' + escapeHtml(row.SKU) + '</td><td class="right strong">' + formatNumber(row.Quantity) + '</td><td class="right">' + formatNumber(row.Lines) + '</td></tr>').join("");
-    const risks = aggregateDimension(rows, "courier").filter((item) => item.total >= 5 && item.onTimeRate < .85).sort((a, b) => a.onTimeRate - b.onTimeRate);
-    const findings = risks.length ? risks.slice(0, 3).map((item) => item.name + ': ' + formatPercent(item.onTimeRate) + ' observed on-time across ' + item.total + ' shipments; request a lane-level corrective-action plan.').join(' ') : 'No courier is below the 85% review threshold among couriers with at least five shipments in this scope.';
+    const risks = aggregateDimension(rows, "courier").filter((item) => item.total >= 5 && item.onTimeRate != null && item.onTimeRate < .85).sort((a, b) => a.onTimeRate - b.onTimeRate);
+    const hasCustomerIdentity = rows.some((row) => row.customerKey);
+    const hasMeasurableSla = metrics(rows).slaCoverage > 0;
+    const findings = risks.length ? risks.slice(0, 3).map((item) => item.name + ': ' + formatPercent(item.onTimeRate) + ' observed on-time across ' + item.total + ' shipments; request a lane-level corrective-action plan.').join(' ') : hasMeasurableSla ? 'No courier is below the 85% review threshold among couriers with at least five measurable deliveries in this scope.' : 'Courier SLA review is unavailable because this data has no EDD dates or matching SLA targets.';
     $("#page").innerHTML = '<div class="page-intro"><div><p class="eyebrow">Active-data findings</p><h2>Insights &amp; suggestions</h2><p>Calculated from the active shipment scope. Missing fields and small samples are called out rather than guessed.</p></div></div>' +
-      '<section class="metric-grid">' + metricCard("Unique customers", formatNumber(customerRows.length), "Name + address", "blue") + metricCard("Repeat customers", formatNumber(customerRows.filter((row) => row.Classification === "Repeat Customer").length), "2+ consolidated orders", "teal") + metricCard("New customers", formatNumber(customerRows.filter((row) => row.Classification === "New Customer").length), "1 observed order", "blue") + metricCard("Product units", formatNumber(rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0)), formatNumber(productRows.length) + " product groups", "amber") + metricCard("Courier reviews", formatNumber(risks.length), "SLA <85% · n≥5", risks.length ? "red" : "teal") + '</section>' +
+      '<section class="metric-grid">' + metricCard("Unique customers", hasCustomerIdentity ? formatNumber(customerRows.length) : "Unavailable", hasCustomerIdentity ? "Name + address" : "Customer identity fields missing", "blue") + metricCard("Repeat customers", hasCustomerIdentity ? formatNumber(customerRows.filter((row) => row.Classification === "Repeat Customer").length) : "Unavailable", "2+ consolidated orders", "teal") + metricCard("New customers", hasCustomerIdentity ? formatNumber(customerRows.filter((row) => row.Classification === "New Customer").length) : "Unavailable", "1 observed order", "blue") + metricCard("Product units", formatNumber(rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0)), formatNumber(productRows.length) + " product groups", "amber") + metricCard("Courier reviews", risks.length ? formatNumber(risks.length) : hasMeasurableSla ? "0" : "Unavailable", "SLA <85% · n≥5", risks.length ? "red" : "teal") + '</section>' +
       '<section class="card-grid equal"><article class="card"><header class="card-head"><div><h3>Recommended action</h3><p>Evidence-led courier review</p></div></header><div class="card-body"><p>' + escapeHtml(findings) + '</p></div></article><article class="card"><header class="card-head"><div><h3>Product movement</h3><p>Ranked by units, not shipment count</p></div>' + kebabButton("Product movement", "insight-products") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Product</th><th>SKU</th><th class="right">Units</th><th class="right">Lines</th></tr></thead><tbody>' + (productHtml || '<tr><td colspan="4">No product line detail in this dataset.</td></tr>') + '</tbody></table></div><h4>Product × city/state</h4><div class="table-scroll"><table class="data-table"><thead><tr><th>Level</th><th>Product</th><th>Geography</th><th class="right">Units</th></tr></thead><tbody>' + (geoRows.map((item) => '<tr><td>' + escapeHtml(item.Level) + '</td><td>' + escapeHtml(item.Product) + '</td><td>' + escapeHtml(item.Geography) + '</td><td class="right">' + formatNumber(item.Units) + '</td></tr>').join('') || '<tr><td colspan="4">Product geography is unavailable without product quantity fields.</td></tr>') + '</tbody></table></div></div></article></section>' +
-      '<article class="card table-card"><header class="card-head"><div><h3>Customer analytics</h3><p>Classification after order consolidation using normalized customer name + address</p></div>' + kebabButton("Customer analytics", "customer-analytics") + '</header><div class="card-body"><div class="table-scroll"><table class="data-table"><thead><tr><th>Customer</th><th>Address</th><th class="right">Orders</th><th>Classification</th><th class="right">Units</th><th class="right">On-time</th><th>Courier</th></tr></thead><tbody>' + (customerHtml || '<tr><td colspan="7">Customer name/address was not available in the source.</td></tr>') + '</tbody></table></div></div><footer class="table-footer"><span>' + formatNumber(customerRows.length) + ' customer identities · showing up to 100</span><span>Computed and raw line-level exports are available</span></footer></article>';
+      '<article class="card table-card"><header class="card-head"><div><h3>Customer analytics</h3><p>Classification after order consolidation using normalized customer name + address</p></div>' + kebabButton("Customer analytics", "customer-analytics") + '</header><div class="card-body">' + (!hasCustomerIdentity ? '<p class="inline-notice">Customer names and delivery addresses are not present in this dataset, so customer counts and repeat-customer classification are unavailable.</p>' : '') + '<div class="table-scroll"><table class="data-table"><thead><tr><th>Customer</th><th>Address</th><th class="right">Orders</th><th>Classification</th><th class="right">Units</th><th class="right">On-time</th><th>Courier</th></tr></thead><tbody>' + (customerHtml || '<tr><td colspan="7">Customer name/address was not available in the source.</td></tr>') + '</tbody></table></div></div><footer class="table-footer"><span>' + formatNumber(customerRows.length) + ' customer identities · showing up to 100</span><span>Computed and raw line-level exports are available</span></footer></article>';
     state.exports.clear();
     registerExport("customer-analytics", { title: "Customer analytics", type: "table", rows: customerExport, raw: customerRows.flatMap((row) => row.sourceRows) });
     registerExport("insight-products", { title: "Product movement", type: "table", rows: productRows, raw: rows });
@@ -534,7 +643,7 @@
   }
 
   function exportAggregateRow(item) {
-    return { Group: item.name, Shipments: item.total, Delivered: item.delivered, "Delivery %": item.deliveryRate * 100, "SLA %": item.onTimeRate * 100, "RTO %": item.rtoRate * 100, "Average TAT": item.avgTat, "P90 TAT": item.p90Tat, Exceptions: item.exceptions, "Freight exposure": item.freight };
+    return { Group: item.name, Shipments: item.total, Delivered: item.delivered, "Delivery %": item.deliveryRate * 100, "SLA %": item.onTimeRate == null ? null : item.onTimeRate * 100, "RTO %": item.rtoRate * 100, "Average TAT": item.avgTat, "P90 TAT": item.p90Tat, Exceptions: item.exceptions, "Freight exposure": item.freight };
   }
 
   function exceptionRows(rows = state.filtered) {
@@ -954,6 +1063,7 @@
         const item = customerSet.get(row.customerKey) || { orders: 0 };
         item.orders++; customerSet.set(row.customerKey, item);
       });
+      if (!customerSet.size) return '<p>Customer repeat analysis is unavailable in this dataset. It has no customer identity fields with enough detail to distinguish customers (for example, a customer name or a recipient name plus address).</p>';
       const repeat = [...customerSet.values()].filter((item) => item.orders > 1).length;
       const newCount = [...customerSet.values()].filter((item) => item.orders === 1).length;
       return '<p>In ' + escapeHtml([dimensions.state, dimensions.city].filter(Boolean).join(' · ') || scopeLabel) + ', I found <b>' + formatNumber(repeat) + ' repeat customers</b> and ' + formatNumber(newCount) + ' customers with one observed order. This uses normalized name + address and only records with both fields populated (' + formatNumber(customerSet.size) + ' identities).</p>';
@@ -966,7 +1076,11 @@
     }
     if (/why.*(delay|late)|delay.*why|cause.*delay/i.test(lower)) {
       const delayed = cohort.filter((row) => row.statusGroup !== 'Delivered' && row.edd && new Date(row.edd) < new Date());
-      if (!delayed.length) return '<p>No open shipment past its EDD was found in this slice. The source data does not support a delay-cause claim.</p>';
+      if (!delayed.length) {
+        const openWithoutPromise = cohort.filter((row) => row.statusGroup !== 'Delivered' && !row.edd);
+        if (openWithoutPromise.length) return `<p>I can’t verify which open shipments are late because ${formatNumber(openWithoutPromise.length)} open rows have no promised delivery date (EDD). Their recorded status and carrier remarks are available, but the source does not establish delay causes.</p>`;
+        return '<p>No open shipment past its EDD was found in this slice. The source data does not support a delay-cause claim.</p>';
+      }
       const reasons = [...groupRows(delayed.filter((row) => row.remark || row.ndrStatus), (row) => row.remark || row.ndrStatus)].map(([name, items]) => ({ name, value: items.length })).sort((a, b) => b.value - a.value).slice(0, 5);
       const carriers = aggregateDimension(delayed, 'courier').sort((a, b) => b.total - a.total);
       return '<p>There are <b>' + formatNumber(delayed.length) + ' open shipments past EDD</b> in this slice. ' + (carriers.length ? escapeHtml(carriers[0].name) + ' is responsible for the largest count (' + formatNumber(carriers[0].total) + '). ' : '') + 'Recorded carrier signals: ' + (reasons.length ? reasons.map((item) => escapeHtml(item.name) + ' (' + formatNumber(item.value) + ')').join(', ') : 'no delay reason was present in the source') + '.</p>';
@@ -985,13 +1099,25 @@
     }
 
     if (/compare.*courier|best courier|courier.*performance|highest.*rto|lowest.*sla/i.test(lower)) {
-      const courierRows = aggregateDimension(cohort, "courier").sort((a, b) => b.onTimeRate - a.onTimeRate);
+      const courierRows = aggregateDimension(cohort, "courier").sort((a, b) => a.onTimeRate == null ? 1 : b.onTimeRate == null ? -1 : b.onTimeRate - a.onTimeRate);
       const highestRto = [...courierRows].sort((a, b) => b.rtoRate - a.rtoRate)[0];
-      return `<p>Here is the courier comparison for ${escapeHtml(scopeLabel)}. <b>${escapeHtml(courierRows[0]?.name || "—")}</b> leads SLA at ${formatPercent(courierRows[0]?.onTimeRate)}, while <b>${escapeHtml(highestRto?.name || "—")}</b> has the highest RTO rate at ${formatPercent(highestRto?.rtoRate)}.</p>${miniComparisonTable(courierRows, "Courier")}`;
+      const bestSla = courierRows.find((item) => item.onTimeRate != null);
+      return `<p>Courier comparison for ${escapeHtml(scopeLabel)}. ${bestSla ? `<b>${escapeHtml(bestSla.name)}</b> leads observed SLA at ${formatPercent(bestSla.onTimeRate)}.` : "SLA ranking is unavailable because this data has no delivered-shipment promise dates or matching targets."} <b>${escapeHtml(highestRto?.name || "—")}</b> has the highest observed RTO rate at ${formatPercent(highestRto?.rtoRate)}.</p>${miniComparisonTable(courierRows, "Courier")}`;
+    }
+
+    if (/courier/i.test(lower) && /(attention|risk|issues?|worst|weak|needs? review|most concern)/i.test(lower)) {
+      const courierRows = aggregateDimension(cohort, "courier").map((item) => ({ ...item, attentionScore: (item.exceptions / (item.total || 1)) + item.rtoRate + (item.onTimeRate == null ? 0 : 1 - item.onTimeRate) })).sort((a, b) => b.attentionScore - a.attentionScore);
+      if (!courierRows.length) return '<p>No couriers are present in this data scope.</p>';
+      state.lastSharvRows = courierRows[0].raw;
+      const lead = courierRows[0];
+      const measure = lead.onTimeRate == null ? `RTO ${formatPercent(lead.rtoRate)} and ${formatNumber(lead.exceptions)} recorded exceptions` : `SLA ${formatPercent(lead.onTimeRate)}, RTO ${formatPercent(lead.rtoRate)}, and ${formatNumber(lead.exceptions)} recorded exceptions`;
+      return `<p><b>${escapeHtml(lead.name)}</b> has the strongest review signal in ${escapeHtml(scopeLabel)}: ${measure} across ${formatNumber(lead.total)} shipments. This prioritization uses only measurable service and exception fields; it does not assign an unobserved delay cause.</p>${miniComparisonTable(courierRows.slice(0, 8), "Courier")}`;
     }
 
     if (/which state|state.*breach|regional risk|worst state/i.test(lower)) {
-      const stateRows = aggregateDimension(cohort, "state").filter((item) => item.total >= 5).sort((a, b) => a.onTimeRate - b.onTimeRate);
+      const allStateRows = aggregateDimension(cohort, "state").filter((item) => item.total >= 5);
+      const stateRows = allStateRows.filter((item) => item.onTimeRate != null).sort((a, b) => a.onTimeRate - b.onTimeRate);
+      if (!stateRows.length) return `<p>State-level SLA cannot be ranked in ${escapeHtml(scopeLabel)} because delivered rows have no EDD or configured SLA target. I can still compare delivery volume, delivery rate, RTO, and transit time by state.</p>${miniComparisonTable(allStateRows.sort((a, b) => b.total - a.total).slice(0, 8), "State")}`;
       return `<p><b>${escapeHtml(stateRows[0]?.name || "No state")}</b> has the lowest observed on-time rate in ${escapeHtml(scopeLabel)} at ${formatPercent(stateRows[0]?.onTimeRate)} across ${formatNumber(stateRows[0]?.total)} shipments.</p>${miniComparisonTable(stateRows.slice(0, 8), "State")}`;
     }
 
@@ -1037,24 +1163,34 @@
   }
 
   function matchSlaRule(dimensions) {
-    const candidates = state.slaRules.filter((rule) => (!rule.courier || normalizeText(rule.courier) === normalizeText(dimensions.courier)) && (!rule.customer || normalizeText(rule.customer) === normalizeText(dimensions.customer)) && (!rule.state || normalizeText(rule.state) === normalizeText(dimensions.state)) && (!rule.city || normalizeText(rule.city) === normalizeText(dimensions.city)));
+    const asOf = dimensions.orderDate ? new Date(dimensions.orderDate).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+    const candidates = state.slaRules.filter((rule) => (!rule.courier || normalizeText(rule.courier) === normalizeText(dimensions.courier)) && (!rule.customer || normalizeText(rule.customer) === normalizeText(dimensions.customer)) && (!rule.state || normalizeText(rule.state) === normalizeText(dimensions.state)) && (!rule.city || normalizeText(rule.city) === normalizeText(dimensions.city)) && (!rule.effectiveFrom || rule.effectiveFrom <= asOf) && (!rule.effectiveTo || rule.effectiveTo >= asOf));
     return candidates.sort((a, b) => [b.customer, b.city, b.state, b.courier].filter(Boolean).length - [a.customer, a.city, a.state, a.courier].filter(Boolean).length)[0] || null;
+  }
+
+  function shipmentOnTime(row) {
+    if (row.onTime !== null && row.onTime !== undefined) return Boolean(row.onTime);
+    if (row.statusGroup !== "Delivered") return null;
+    const target = Number(row.serviceTarget) > 0 ? Number(row.serviceTarget) : Number(matchSlaRule(row)?.targetDays);
+    const tat = Number(row.tat);
+    if (!Number.isFinite(target) || target <= 0 || !Number.isFinite(tat) || tat < 0) return null;
+    return tat <= target;
   }
 
   function slaAnswer(rows, dimensions, scopeLabel) {
     const label = [dimensions.customer, dimensions.courier, dimensions.city, dimensions.state].filter(Boolean).join(" · ") || "selected scope";
     if (!rows.length) return `<p>There are no shipments for <b>${escapeHtml(label)}</b> in ${escapeHtml(scopeLabel)}. I won’t infer an SLA from a zero-row sample.</p>`;
-    const delivered = rows.filter((row) => row.statusGroup === "Delivered" && Number.isFinite(row.tat));
-    const promised = delivered.filter((row) => row.edd && row.deliveredDate);
+    const delivered = rows.filter((row) => row.statusGroup === "Delivered");
+    const observed = delivered.map((row) => ({ row, onTime: shipmentOnTime(row) })).filter((item) => item.onTime !== null);
     const rule = matchSlaRule(dimensions);
-    const target = rule?.targetDays ?? percentile(rows.map((row) => Number(row.serviceTarget)).filter(Number.isFinite), .5);
-    const compliant = delivered.filter((row) => rule ? row.tat <= target : row.onTime).length;
-    const denominator = rule ? delivered.length : promised.length;
+    const compliant = observed.filter((item) => item.onTime).length;
+    const denominator = observed.length;
     const compliance = denominator ? compliant / denominator : null;
     const kpi = metrics(rows);
-    const confidence = delivered.length < 10 ? "Low sample" : delivered.length < 30 ? "Directional" : "Reliable";
-    const definition = rule ? `Configured contractual target: ${formatNumber(target, 1)} calendar days (${escapeHtml(rule.serviceLevel || "standard service")}).` : `No matching contractual rule is configured; compliance below is observed against each shipment’s promised EDD.`;
-    return `<p>For <b>${escapeHtml(label)}</b>, I analysed <b>${formatNumber(rows.length)} shipments</b> in ${escapeHtml(scopeLabel)}.</p><div class="answer-summary"><span class="chip ${compliance == null ? "neutral" : compliance >= .8 ? "status-good" : "status-warn"}">${compliance == null ? "SLA not measurable" : `${formatPercent(compliance)} SLA compliance`}</span><span class="chip neutral">Avg TAT ${formatNumber(kpi.avgTat, 1)}${kpi.avgTat == null ? "" : "d"}</span><span class="chip neutral">P90 ${formatNumber(kpi.p90Tat, 1)}${kpi.p90Tat == null ? "" : "d"}</span><span class="chip ${kpi.rtoRate > .1 ? "status-bad" : "neutral"}">RTO ${formatPercent(kpi.rtoRate)}</span></div><p>${definition}</p>${denominator ? `<p><b>Evidence:</b> ${formatNumber(compliant)} of ${formatNumber(denominator)} eligible delivered shipments met the measure; ${formatNumber(delivered.length)} delivered, ${formatNumber(kpi.open)} still open. Coverage is ${formatPercent(denominator / (rows.length || 1))}. Confidence: ${confidence}.</p>` : `<p><b>Evidence:</b> There are no eligible delivered shipments in this slice yet. ${formatNumber(kpi.open)} shipment${kpi.open === 1 ? " is" : "s are"} still open, so a compliance rate would be misleading.</p>`}${delivered.length < 5 ? `<p class="subtle">This sample is too small for a stable operational conclusion.</p>` : ""}`;
+    const confidence = denominator < 10 ? "Low sample" : denominator < 30 ? "Directional" : "Reliable";
+    const definition = rule ? `A configured ${escapeHtml(rule.serviceLevel || "standard service")} target is available for the selected lane. Where a shipment has its own EDD, that promise takes precedence.` : "I use each shipment’s EDD or a matching configured SLA rule. A typical or median transit time is not treated as a promise.";
+    const evidence = denominator ? `<p><b>Evidence:</b> ${formatNumber(compliant)} of ${formatNumber(denominator)} eligible delivered shipments met the measure; ${formatNumber(delivered.length)} delivered. Coverage is ${formatPercent(denominator / (delivered.length || 1))}. Confidence: ${confidence}.</p>` : `<p><b>Evidence:</b> This data does not contain an EDD or a matching SLA target for delivered shipments in this scope, so SLA compliance is unavailable. Average transit time is ${formatNumber(kpi.avgTat, 1)}${kpi.avgTat == null ? "" : " days"}; ${formatNumber(kpi.open)} shipments remain open.</p>`;
+    return `<p>For <b>${escapeHtml(label)}</b>, I analysed <b>${formatNumber(rows.length)} shipments</b> in ${escapeHtml(scopeLabel)}.</p><div class="answer-summary"><span class="chip ${compliance == null ? "neutral" : compliance >= .8 ? "status-good" : "status-warn"}">${compliance == null ? "SLA not measurable" : `${formatPercent(compliance)} SLA compliance`}</span><span class="chip neutral">Avg TAT ${formatNumber(kpi.avgTat, 1)}${kpi.avgTat == null ? "" : "d"}</span><span class="chip neutral">P90 ${formatNumber(kpi.p90Tat, 1)}${kpi.p90Tat == null ? "" : "d"}</span><span class="chip ${kpi.rtoRate > .1 ? "status-bad" : "neutral"}">RTO ${formatPercent(kpi.rtoRate)}</span></div><p>${definition}</p>${evidence}${denominator > 0 && denominator < 5 ? `<p class="subtle">This sample is too small for a stable operational conclusion.</p>` : ""}`;
   }
 
   function cohortSummaryAnswer(rows, label, scopeLabel) {
@@ -1068,7 +1204,7 @@
   }
 
   function registerExport(key, definition) {
-    state.exports.set(key, definition);
+    state.exports.set(key, { key, ...definition });
   }
 
   function sanitizedCell(value) {
@@ -1168,16 +1304,21 @@
   }
 
   async function copyExportSummary(definition) {
-    const text = `${definition.title}\nScope: ${state.filtered.length} of ${state.shipments.length} shipments\nComputed rows: ${definition.rows.length}\nExported: ${new Date().toLocaleString("en-IN")}`;
+    const computedRows = definition.filteredRows || definition.rows;
+    const rawRows = definition.filteredRaw || definition.raw;
+    const text = `${definition.title}\nScope: ${formatNumber(rawRows.length)} shipment rows\nComputed rows: ${formatNumber(computedRows.length)}\nExported: ${new Date().toLocaleString("en-IN")}`;
     try { await navigator.clipboard.writeText(text); toast("Summary copied", "Paste it into email, chat, or a review note."); }
     catch (_) { toast("Copy unavailable", "Your browser blocked clipboard access.", "error"); }
   }
 
   function exportMenuItems(definition) {
+    const computedRows = definition.filteredRows || definition.rows;
+    const rawRows = definition.filteredRaw || definition.raw;
     return [
       ...(definition.type === "chart" ? [{ label: "Download chart image", hint: "PNG with title and legend", action: "download-image", icon: "image" }] : []),
-      { label: definition.type === "chart" ? "Download summarized data" : "Download this computed table", hint: `${formatNumber(definition.rows.length)} exact result rows`, action: "download-view", icon: "download" },
-      { label: "Download underlying raw data", hint: `${formatNumber(definition.raw.length)} shipment rows`, action: "download-raw", icon: "file" },
+      { label: definition.type === "chart" ? "Download summarized data" : "Download this computed table", hint: `${formatNumber(computedRows.length)} result rows`, action: "download-view", icon: "download" },
+      { label: "Download underlying raw data", hint: `${formatNumber(rawRows.length)} shipment rows`, action: "download-raw", icon: "file" },
+      ...(definition.type === "table" && SLACK_SHAREABLE_TABLES.has(definition.key) ? [{ label: "Schedule Slack share", hint: "Send this table on a recurring schedule", action: "schedule-slack", icon: "trend" }] : []),
       { separator: true },
       { label: "Copy export summary", action: "copy-summary", icon: "copy" }
     ];
@@ -1195,8 +1336,9 @@
     }
     if (!definition) return;
     if (action === "download-image") downloadChart(definition.chartId, definition.title);
-    if (action === "download-view") downloadWorkbook(definition.rows, `SHARV-${definition.title}`, definition.type === "chart" ? "Chart data" : "Computed table");
-    if (action === "download-raw") downloadRawWorkbook(definition.raw, `SHARV-${definition.title}-raw`, "Underlying raw");
+    if (action === "download-view") downloadWorkbook(definition.filteredRows || definition.rows, `SHARV-${definition.title}`, definition.type === "chart" ? "Chart data" : "Computed table");
+    if (action === "download-raw") downloadRawWorkbook(definition.filteredRaw || definition.raw, `SHARV-${definition.title}-raw`, "Underlying raw");
+    if (action === "schedule-slack") { closeMenu(); openSlackScheduleModal(definition); return; }
     if (action === "copy-summary") copyExportSummary(definition);
     closeMenu();
   }
@@ -1272,6 +1414,15 @@
     return String(value || "").trim().toLowerCase().replace(/[\n\r]+/g, " ").replace(/[_-]+/g, " ").replace(/\s+/g, " ");
   }
 
+  function numberValue(value) {
+    if (value === null || value === undefined || String(value).trim() === "") return null;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    const cleaned = String(value).trim().replace(/,/g, "");
+    if (/^(?:n\/?a|n\.a\.|-+)$/i.test(cleaned)) return null;
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
   function readAlias(row, ...aliases) {
     for (const alias of aliases) {
       const value = row[normalizeHeader(alias)];
@@ -1295,6 +1446,12 @@
     return String(value || "").trim().toLowerCase().replace(/\b\w/g, (letter) => letter.toUpperCase()).replace(/\bNcr\b/g, "NCR");
   }
 
+  function courierName(value) {
+    const aliases = { bluedart: "BlueDart", dtdc: "DTDC", xpressbees: "XpressBees", itl: "iTL" };
+    const label = titleCase(value);
+    return aliases[normalizeText(value).replace(/\s/g, "")] || label;
+  }
+
   function classifyStatus(status, remark = "") {
     const value = `${status} ${remark}`;
     if (/lost|damag/i.test(value)) return "Lost / Damaged";
@@ -1309,24 +1466,25 @@
     const awbRaw = readAlias(row, "awb", "awb no", "awb number", "tracking id", "tracking number", "waybill") || row.__mapped_awb;
     const orderRaw = readAlias(row, "order id", "order number", "order no", "reference id", "client order id");
     if (!awbRaw && !orderRaw) return { error: `Row ${index + 1}: AWB and order ID are both missing.` };
-    const status = String(readAlias(row, "order status", "status", "shipment status", "current status") || "In Transit").trim();
+    const statusGroupSource = String(readAlias(row, "status group", "shipment status group", "normalized status") || "").trim();
+    const status = String(readAlias(row, "courier status raw", "courier status", "order status", "status", "shipment status", "current status") || statusGroupSource || "In Transit").trim();
     const remark = String(readAlias(row, "remark", "remarks", "rto reason", "latest remark", "latest_remark", "reason") || "").trim();
     const pickupDate = toIso(readAlias(row, "pickup date", "order pickup date", "pickuptime", "picked up date"));
     const deliveredDate = toIso(readAlias(row, "delivered date", "order delivered date", "delivertime", "delivery date"));
     const edd = toIso(readAlias(row, "edd", "expected delivery date", "promised date", "sla date"));
     const orderDate = toIso(readAlias(row, "order date", "created at", "created date", "booking date")) || pickupDate || new Date().toISOString();
-    const tatRaw = Number(readAlias(row, "tat", "tat days", "transit days"));
+    const tatRaw = numberValue(readAlias(row, "tat", "tat days", "transit days", "d2d days", "d2d (days)", "d2d"));
     const tat = Number.isFinite(tatRaw) && tatRaw >= 0 ? tatRaw : pickupDate && deliveredDate ? Math.max(0, (new Date(deliveredDate) - new Date(pickupDate)) / 864e5) : null;
-    const targetRaw = Number(readAlias(row, "sla target", "sla days", "target days", "service target days"));
+    const targetRaw = numberValue(readAlias(row, "sla target", "sla days", "target days", "service target days"));
     const serviceTarget = Number.isFinite(targetRaw) && targetRaw > 0 ? targetRaw : pickupDate && edd ? Math.max(1, Math.round((new Date(edd) - new Date(pickupDate)) / 864e5)) : null;
-    const ageRaw = Number(readAlias(row, "ageing", "aging", "age", "ageing days"));
-    const attemptsRaw = Number(readAlias(row, "attempt count", "delivery attempts", "delivery_attempts", "attempts"));
-    const freightRaw = Number(readAlias(row, "freight charge (inr)", "total freight charge", "freight", "shipping charge", "freight inr"));
+    const ageRaw = numberValue(readAlias(row, "ageing", "aging", "age", "ageing days"));
+    const attemptsRaw = numberValue(readAlias(row, "attempt count", "delivery attempts", "delivery_attempts", "attempts"));
+    const freightRaw = numberValue(readAlias(row, "freight charge (inr)", "freight charge", "total freight charge", "freight", "shipping charge", "freight inr"));
     const cityAliases = { Bangalore: "Bengaluru", "New Delhi": "Delhi", Gurgaon: "Gurugram", Bombay: "Mumbai" };
     const cityOriginal = titleCase(readAlias(row, "customer city", "shipping city", "shipping_city", "city", "destination city"));
     const city = cityAliases[cityOriginal] || cityOriginal || "Unknown";
     const fallbackStates = { Bengaluru: "Karnataka", Mysore: "Karnataka", Mumbai: "Maharashtra", Pune: "Maharashtra", Delhi: "Delhi", Gurugram: "Haryana", Hyderabad: "Telangana", Chennai: "Tamil Nadu", Kochi: "Kerala", Ahmedabad: "Gujarat", Kolkata: "West Bengal", Jaipur: "Rajasthan", Lucknow: "Uttar Pradesh" };
-    const statusGroup = classifyStatus(status, remark);
+    const statusGroup = classifyStatus(statusGroupSource || status, remark);
     const direction = /rvp|dto|reverse|return pickup/i.test(`${status} ${remark}`) ? "RVP / DTO" : statusGroup.startsWith("RTO") ? "RTO" : "Forward";
     return { value: {
       id: `${source}-${String(awbRaw || orderRaw).trim()}`,
@@ -1334,7 +1492,7 @@
       customer: titleCase(readAlias(row, "customer account", "merchant", "brand", "account", "client", "customer brand")) || "Unassigned customer",
       recipientName: titleCase(readAlias(row, "customer name", "recipient name", "shipping name", "consignee", "buyer name")) || "Not provided",
       customerAddress: String(readAlias(row, "customer address", "shipping address", "address", "delivery address") || "").trim(),
-      courier: titleCase(readAlias(row, "courier company", "courier", "carrier", "logistics partner")) || source,
+      courier: courierName(readAlias(row, "courier company", "courier", "carrier", "logistics partner")) || source,
       city, state: titleCase(readAlias(row, "customer state", "shipping state", "state", "destination state")) || fallbackStates[city] || "Unknown",
       pincode: String(readAlias(row, "customer pincode", "shipping pincode", "shipping_pincode", "pincode", "postal code", "zip") || "").replace(/\.0$/, ""),
       warehouse: String(readAlias(row, "origin warehouse", "warehouse nick name", "warehouse name", "warehouse_name", "pickup warehouse") || "Unknown"),
@@ -1689,6 +1847,129 @@
     else if (state.route === "studio") renderStudio();
     else if (state.route === "sharv") renderSharv();
     else renderPlaceholder(state.route);
+    installTableFilters();
+  }
+
+  function installTableFilters() {
+    $$("#page table.data-table").forEach((table, index) => {
+      if (table.dataset.filterReady) return;
+      table.dataset.filterReady = "true";
+      const card = table.closest(".card");
+      const menuKey = card?.querySelector("[data-menu]")?.dataset.menu || "";
+      const definition = state.exports.get(menuKey);
+      const control = document.createElement("label");
+      control.className = "table-filter-control";
+      control.innerHTML = `<span>${icon("search")}</span><input type="search" autocomplete="off" placeholder="Filter ${escapeHtml(card?.querySelector("h3")?.textContent || "table")} rows" aria-label="Filter table rows"><small></small>`;
+      const scroll = table.closest(".table-scroll");
+      const insertBefore = scroll || table;
+      insertBefore.parentElement.insertBefore(control, insertBefore);
+      const input = control.querySelector("input");
+      const count = control.querySelector("small");
+      const bodyRows = [...table.tBodies].flatMap((body) => [...body.rows]);
+      const update = () => {
+        const query = normalizeText(input.value);
+        let visible = 0;
+        bodyRows.forEach((row) => {
+          const show = !query || normalizeText(row.textContent).includes(query);
+          row.hidden = !show;
+          if (show) visible += 1;
+        });
+        count.textContent = `${formatNumber(visible)} shown`;
+        if (!definition) return;
+        const includesQuery = (row) => normalizeText(JSON.stringify(row)).includes(query);
+        definition.filteredRows = query ? definition.rows.filter(includesQuery) : definition.rows;
+        definition.filteredRaw = query ? definition.raw.filter(includesQuery) : definition.raw;
+        definition.searchTerm = input.value.trim();
+        state.currentTable = { name: definition.title, rows: definition.filteredRows };
+      };
+      input.addEventListener("input", update);
+      if (definition) definition.tableIndex = index;
+      update();
+    });
+  }
+
+  function getLocalDateParts(date, timezone) {
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+    return Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
+  }
+
+  function zonedDateTime(date, time, timezone) {
+    const [year, month, day] = date.split("-").map(Number);
+    const [hour, minute] = time.split(":").map(Number);
+    const target = Date.UTC(year, month - 1, day, hour, minute);
+    let guess = new Date(target);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(guess);
+      const values = Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
+      const represented = Date.UTC(values.year, values.month - 1, values.day, values.hour, values.minute);
+      guess = new Date(guess.getTime() + target - represented);
+    }
+    return guess;
+  }
+
+  function nextSlackRunAt(frequency, time, startDate, timezone) {
+    const [anchorYear, anchorMonth, anchorDay] = startDate.split("-").map(Number);
+    const now = new Date();
+    const maxChecks = frequency === "daily" ? 400 : frequency === "monthly" ? 72 : 30;
+    for (let offset = 0; offset < maxChecks; offset += 1) {
+      let year = anchorYear, month = anchorMonth, day = anchorDay;
+      if (frequency === "daily") {
+        const date = new Date(Date.UTC(anchorYear, anchorMonth - 1, anchorDay + offset));
+        year = date.getUTCFullYear(); month = date.getUTCMonth() + 1; day = date.getUTCDate();
+      } else if (frequency === "monthly") {
+        const date = new Date(Date.UTC(anchorYear, anchorMonth - 1 + offset, 1));
+        year = date.getUTCFullYear(); month = date.getUTCMonth() + 1;
+        day = Math.min(anchorDay, new Date(Date.UTC(year, month, 0)).getUTCDate());
+      } else {
+        year += offset;
+        day = Math.min(anchorDay, new Date(Date.UTC(year, month, 0)).getUTCDate());
+      }
+      const dateLabel = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      const candidate = zonedDateTime(dateLabel, time, timezone);
+      if (candidate > now) return candidate.toISOString();
+    }
+    throw new Error("Could not calculate the next Slack delivery time.");
+  }
+
+  function openSlackScheduleModal(definition) {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+    const now = new Date();
+    const today = getLocalDateParts(now, timezone);
+    const startDate = `${today.year}-${String(today.month).padStart(2, "0")}-${String(today.day).padStart(2, "0")}`;
+    const initial = nextSlackRunAt("daily", "09:00", startDate, timezone);
+    const firstRun = new Intl.DateTimeFormat("en-IN", { timeZone: timezone, dateStyle: "medium", timeStyle: "short" }).format(new Date(initial));
+    openModal(`<header class="modal-head"><div><p class="eyebrow">Scheduled delivery</p><h2 id="modalTitle">Share ${escapeHtml(definition.title)} to Slack</h2><p>SHARV will rebuild this table from the latest authorized dataset when each schedule runs.</p></div><button class="icon-button" type="button" data-close-modal aria-label="Close">${icon("close")}</button></header><div class="modal-body"><div class="builder-grid"><label class="field"><span>Slack channel ID</span><input id="slackChannelId" type="text" placeholder="e.g. C012ABCDEF" autocomplete="off" required><small>Use a Slack channel ID. The bot must be a member of that channel.</small></label><label class="field"><span>Repeat</span><select id="slackFrequency"><option value="daily">Daily</option><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></label><label class="field"><span>Start date</span><input id="slackStartDate" type="date" value="${startDate}" required></label><label class="field"><span>Send time</span><input id="slackSendTime" type="time" value="09:00" required><small>Timezone: ${escapeHtml(timezone)}</small></label></div><p class="inline-notice" id="slackSchedulePreview">First delivery: ${escapeHtml(firstRun)}. Monthly and yearly schedules repeat on the start-date day.</p><p class="field-hint">Only the computed table is sent. Current global filters and this table’s search are saved with the schedule.</p><p class="form-error" id="slackScheduleError" role="alert"></p></div><footer class="modal-actions"><button class="button secondary" type="button" data-close-modal>Cancel</button><button class="button primary" type="button" id="saveSlackSchedule">Save schedule</button></footer>`);
+    const frequency = $("#slackFrequency");
+    const dateInput = $("#slackStartDate");
+    const timeInput = $("#slackSendTime");
+    const preview = $("#slackSchedulePreview");
+    const updatePreview = () => {
+      try {
+        const nextRun = nextSlackRunAt(frequency.value, timeInput.value, dateInput.value, timezone);
+        preview.textContent = `First delivery: ${new Intl.DateTimeFormat("en-IN", { timeZone: timezone, dateStyle: "medium", timeStyle: "short" }).format(new Date(nextRun))}. ${frequency.value === "monthly" ? `Repeats on day ${Number(dateInput.value.slice(-2))} of each month.` : frequency.value === "yearly" ? `Repeats each year on ${dateInput.value.slice(5)}.` : "Repeats every day."}`;
+        return nextRun;
+      } catch (error) { preview.textContent = error.message; return null; }
+    };
+    [frequency, dateInput, timeInput].forEach((input) => input.addEventListener("change", updatePreview));
+    $("#saveSlackSchedule").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      const channelId = $("#slackChannelId").value.trim();
+      const nextRunAt = updatePreview();
+      const errorLabel = $("#slackScheduleError");
+      if (!channelId || !dateInput.value || !timeInput.value || !nextRunAt) { errorLabel.textContent = "Enter a channel, date, and time to continue."; return; }
+      if (!state.supabase || !state.user) { errorLabel.textContent = "Sign in to save a Slack schedule to your account."; return; }
+      button.disabled = true; button.textContent = "Saving…"; errorLabel.textContent = "";
+      const [year, month, day] = dateInput.value.split("-").map(Number);
+      const { error } = await state.supabase.from("slack_share_schedules").insert({
+        owner_id: state.user.id, title: definition.title, table_key: definition.key, channel_id: channelId,
+        frequency: frequency.value, schedule_time: timeInput.value, timezone,
+        schedule_day: day, schedule_month: month, next_run_at: nextRunAt,
+        filters: state.filters, search_query: definition.searchTerm || "", enabled: true
+      });
+      button.disabled = false; button.textContent = "Save schedule";
+      if (error) { errorLabel.textContent = error.message.includes("slack_share_schedules") ? "The Slack scheduler is not set up in Supabase yet. Apply supabase/slack_share.sql and deploy its Edge Function first." : error.message; return; }
+      closeModal(); toast("Slack schedule saved", `Next delivery: ${new Intl.DateTimeFormat("en-IN", { timeZone: timezone, dateStyle: "medium", timeStyle: "short" }).format(new Date(nextRunAt))}.`);
+    });
   }
 
   function openMenu(anchor, items, context = anchor.dataset.menu || "") {
@@ -1721,6 +2002,8 @@
 
   function setupEvents() {
     document.addEventListener("click", (event) => {
+      const performanceTab = event.target.closest("[data-performance-tab]");
+      if (performanceTab) { state.performanceTab = performanceTab.dataset.performanceTab; renderRoute(); return; }
       const menuAction = event.target.closest("#menuPopover [data-action]");
       if (menuAction) { handleMenuAction(menuAction.dataset.action, $("#menuPopover").dataset.context); return; }
       const closeButton = event.target.closest("[data-close-modal]");

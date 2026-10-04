@@ -1,0 +1,2 @@
+[functions.share-scheduled-table]
+verify_jwt = false

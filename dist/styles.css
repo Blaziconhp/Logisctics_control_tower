@@ -203,6 +203,15 @@ svg { display: block; width: 18px; height: 18px; fill: none; stroke: currentColo
 .table-search input { width: 100%; min-height: 38px; padding: 7px 10px 7px 34px; border: 1px solid var(--ink-200); border-radius: 7px; }
 .table-meta { margin-left: auto; color: var(--ink-500); font-size: .72rem; }
 .table-scroll { width: 100%; overflow: auto; border-top: 1px solid var(--ink-100); }
+.table-filter-control { display: flex; align-items: center; gap: 9px; width: min(100%, 360px); margin: 0 0 10px; padding: 8px 10px; color: var(--ink-500); background: var(--ink-50); border: 1px solid var(--ink-100); border-radius: 8px; }
+.table-filter-control svg { width: 15px; height: 15px; flex: 0 0 auto; }
+.table-filter-control input { width: 100%; min-width: 0; color: var(--ink-800); background: transparent; border: 0; outline: 0; font: inherit; font-size: .76rem; }
+.table-filter-control small { flex: 0 0 auto; white-space: nowrap; font-size: .66rem; }
+.performance-tabs { display: flex; gap: 5px; margin: 18px 0 14px; padding: 4px; overflow-x: auto; background: var(--ink-100); border-radius: 9px; }
+.performance-tabs button { flex: 0 0 auto; min-height: 34px; padding: 6px 13px; color: var(--ink-600); background: transparent; border: 0; border-radius: 6px; font-size: .76rem; font-weight: 650; cursor: pointer; }
+.performance-tabs button.active, .performance-tabs button[aria-selected="true"] { color: var(--ink-900); background: white; box-shadow: var(--shadow-sm); }
+.inline-notice { margin: 12px 0 0; padding: 10px 12px; color: #704314; background: var(--amber-soft); border: 1px solid #f4dfbd; border-radius: 8px; font-size: .76rem; line-height: 1.5; }
+.performance-panel > .card-grid { margin-top: 0; }
 .data-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .77rem; }
 .data-table th, .data-table td { min-height: 42px; padding: 10px 13px; border-bottom: 1px solid var(--ink-100); text-align: left; white-space: nowrap; }
 .data-table th { position: sticky; top: 0; z-index: 2; color: var(--ink-600); background: var(--ink-50); font-size: .67rem; font-weight: 740; letter-spacing: .04em; text-transform: uppercase; }
