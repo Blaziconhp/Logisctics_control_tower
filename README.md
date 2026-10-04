@@ -60,9 +60,11 @@ Never put a Supabase service-role key in browser code. The supplied row-level-se
 2. Set `SLACK_BOT_TOKEN` and a long random `SHARV_CRON_SECRET` as Supabase Edge Function secrets. Keep both out of `config.js` and Git:
 
    ```sh
-   supabase secrets set SLACK_BOT_TOKEN=xoxb-... SHARV_CRON_SECRET=... SUPABASE_URL=https://YOUR_PROJECT.supabase.co SUPABASE_SERVICE_ROLE_KEY=...
+   supabase secrets set SLACK_BOT_TOKEN=xoxb-... SHARV_CRON_SECRET=...
    supabase functions deploy share-scheduled-table
    ```
+
+   Supabase supplies `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to Edge Functions automatically; do not copy the service-role key into the browser or repository.
 
 3. In Supabase Vault, store the project URL as `sharv_project_url` and the same cron secret as `sharv_cron_secret`. Then apply [`supabase/slack_share.sql`](supabase/slack_share.sql) in the SQL Editor. It adds owner-only schedule records and invokes the function once per minute to process due deliveries.
 4. In a supported table’s three-dot menu, choose **Schedule Slack share**, enter the channel ID, frequency, start date, and time. The chosen timezone and current global/table filters are saved. The Edge Function rebuilds the computed table from the latest cloud dataset and shares it as a Slack table message or CSV attachment.
