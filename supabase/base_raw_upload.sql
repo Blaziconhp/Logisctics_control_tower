@@ -64,6 +64,12 @@ as $$
 declare
   v_count integer;
 begin
+  -- Large normalized workbooks can require more than Supabase's short
+  -- default statement window while the staged JSON is converted into rows.
+  -- Keep the replacement atomic, but allow the single transaction enough
+  -- time to finish instead of timing out halfway through the insert.
+  set local statement_timeout = '120s';
+  set local lock_timeout = '15s';
   if not private.is_upload_admin() then
     raise exception 'Upload administrator access required' using errcode = '42501';
   end if;

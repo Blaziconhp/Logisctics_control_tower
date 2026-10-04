@@ -1582,17 +1582,34 @@
       pickup_date: row.pickupDate, delivered_date: row.deliveredDate, edd: row.edd,
       tat_days: row.tat, sla_target_days: row.serviceTarget, ageing_days: row.age,
       attempts: row.attempts, freight_inr: row.freight, ndr_status: row.ndrStatus,
-      remark: row.remark, on_time: row.onTime, upload_batch_id: batchId, raw_payload: row.rawPayload || {}
+      remark: row.remark, on_time: row.onTime, upload_batch_id: batchId, raw_payload: compactRawPayload(row)
     };
+  }
+
+  function compactRawPayload(row) {
+    const raw = { ...(row.rawPayload || {}) };
+    const sourceLines = Array.isArray(raw.__lineItems) ? raw.__lineItems : [];
+    // The full source rows remain in the private uploaded file. Keep the
+    // database payload bounded: dashboard reloads only need the normalized
+    // row plus compact product-line details for product analytics.
+    raw.__lineItems = sourceLines.map((line) => ({
+      productName: String(line.productName || readAlias(line, "product name", "product", "item name", "description", "product title") || "").trim(),
+      sku: String(line.sku || readAlias(line, "sku", "product sku", "seller sku", "item sku") || "").trim(),
+      quantity: Math.max(0, Number(line.quantity ?? readAlias(line, "quantity", "qty", "item quantity", "units")) || 0)
+    })).filter((line) => line.productName || line.sku || line.quantity);
+    raw.__lineItemCount = sourceLines.length;
+    raw.__customerAddress = row.customerAddress || raw.__customerAddress || "";
+    raw.__recipientName = row.recipientName || raw.__recipientName || "";
+    return raw;
   }
 
   function fromDbShipment(row) {
     const sourceLines = row.raw_payload?.__lineItems || [];
-    const productItems = sourceLines.map((line) => ({ productName: readAlias(line, "product name", "product", "item name", "description", "product title") || "", sku: readAlias(line, "sku", "product sku", "seller sku", "item sku") || "", quantity: Number(readAlias(line, "quantity", "qty", "item quantity", "units")) || 0 }));
+    const productItems = sourceLines.map((line) => ({ productName: line.productName || readAlias(line, "product name", "product", "item name", "description", "product title") || "", sku: line.sku || readAlias(line, "sku", "product sku", "seller sku", "item sku") || "", quantity: Number(line.quantity ?? readAlias(line, "quantity", "qty", "item quantity", "units")) || 0 }));
     return classifyCustomerOrders([{
       id: row.id, source: row.source_system, awb: String(row.awb), orderId: String(row.order_id || ""),
       customer: row.customer_account || "Unassigned customer", recipientName: row.recipient_name || "Not provided",
-      customerAddress: readAlias(sourceLines[0] || row.raw_payload || {}, "customer address", "shipping address", "address", "delivery address") || "",
+      customerAddress: row.raw_payload?.__customerAddress || readAlias(sourceLines[0] || row.raw_payload || {}, "customer address", "shipping address", "address", "delivery address") || "",
       courier: row.courier || row.source_system, city: row.city || "Unknown", state: row.state || "Unknown", pincode: row.pincode || "",
       warehouse: row.warehouse || "Unknown", payment: row.payment_type || "Unknown", mode: row.transport_mode || "Surface",
       direction: row.direction || "Forward", status: row.status || "In Transit", statusGroup: row.status_group || classifyStatus(row.status, row.remark),
@@ -1707,7 +1724,11 @@
         loadCloudState().then(() => renderRoute()).catch((refreshError) => console.warn("Post-upload refresh pending", refreshError));
         return;
       }
-      toast("Upload failed", error.message || "The workbook could not be processed.", "error");
+      const uploadMessage = error.message || "The workbook could not be processed.";
+      const migrationHint = /statement timeout|canceling statement/i.test(uploadMessage)
+        ? " Apply the latest supabase/base_raw_upload.sql migration in Supabase SQL Editor, then retry; the replacement remains atomic."
+        : "";
+      toast("Upload failed", `${uploadMessage}${migrationHint}`, "error");
     }
   }
 
