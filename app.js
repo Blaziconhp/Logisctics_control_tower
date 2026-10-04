@@ -1029,6 +1029,15 @@
     }
 
     const dimensions = detectQuestionDimensions(question, source);
+    const asksAboutCustomer = /\b(customer|recipient|buyer|consignee)\b/i.test(question) ||
+      (!dimensions.courier && !dimensions.state && !dimensions.city && !dimensions.pincode &&
+        /\b(?:orders?|shipments?)\s+(?:from|for|of)\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b/.test(question));
+    const hasCustomerNames = source.some((row) =>
+      (row.customer && row.customer !== "Unassigned customer") ||
+      (row.recipientName && row.recipientName !== "Not provided"));
+    if (asksAboutCustomer && !hasCustomerNames) {
+      return '<p>I can’t look up that customer or count their orders from this upload because it has no customer or recipient names. It does include AWB and order IDs, couriers, products, and destinations, so I can investigate those fields if you provide one.</p>';
+    }
     if (/compare/i.test(lower)) {
       const normalizedQuestion = normalizeText(question);
       const mentionedStates = [...new Set(source.map((row) => row.state).filter(Boolean))].filter((name) => normalizedQuestion.includes(normalizeText(name)));
