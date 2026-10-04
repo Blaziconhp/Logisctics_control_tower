@@ -1069,10 +1069,13 @@
       return '<p>In ' + escapeHtml([dimensions.state, dimensions.city].filter(Boolean).join(' · ') || scopeLabel) + ', I found <b>' + formatNumber(repeat) + ' repeat customers</b> and ' + formatNumber(newCount) + ' customers with one observed order. This uses normalized name + address and only records with both fields populated (' + formatNumber(customerSet.size) + ' identities).</p>';
     }
     if (/worst|lowest|risk|breach/i.test(lower) && /pincode|pin code|postal/i.test(lower)) {
-      const pins = aggregateDimension(cohort, 'pincode').filter((item) => item.name && item.name !== 'Unknown' && item.total >= 3).sort((a, b) => a.onTimeRate - b.onTimeRate);
+      const pins = aggregateDimension(cohort, 'pincode').filter((item) => item.name && item.name !== 'Unknown' && item.total >= 3);
       if (!pins.length) return '<p>No pincode has the minimum three shipments needed for a directional performance ranking.</p>';
+      const hasSla = pins.some((item) => item.onTimeRate != null);
+      pins.sort(hasSla ? (a, b) => (a.onTimeRate ?? 1) - (b.onTimeRate ?? 1) : (a, b) => b.rtoRate - a.rtoRate || a.deliveryRate - b.deliveryRate);
       state.lastSharvRows = pins[0].raw;
-      return '<p>Lowest observed pincode SLA' + (dimensions.courier ? ' for ' + escapeHtml(dimensions.courier) : '') + ' (minimum three shipments per pin):</p>' + miniComparisonTable(pins.slice(0, 8).map((item) => ({ name: item.name, total: item.total, deliveryRate: item.deliveryRate, onTimeRate: item.onTimeRate, rtoRate: item.rtoRate, exceptions: item.exceptions })), 'Pincode');
+      const rankingBasis = hasSla ? 'Lowest observed pincode SLA' : 'Pincodes ranked by RTO rate, then delivery rate; SLA is unavailable because this data has no EDD or matching target';
+      return '<p>' + rankingBasis + (dimensions.courier ? ' for ' + escapeHtml(dimensions.courier) : '') + ' (minimum three shipments per pin):</p>' + miniComparisonTable(pins.slice(0, 8).map((item) => ({ name: item.name, total: item.total, deliveryRate: item.deliveryRate, onTimeRate: item.onTimeRate, rtoRate: item.rtoRate, exceptions: item.exceptions })), 'Pincode');
     }
     if (/why.*(delay|late)|delay.*why|cause.*delay/i.test(lower)) {
       const delayed = cohort.filter((row) => row.statusGroup !== 'Delivered' && row.edd && new Date(row.edd) < new Date());
