@@ -103,7 +103,7 @@ function percentile(values: number[], q: number): number | null {
 function metrics(rows: Shipment[]) {
   const delivered = rows.filter(isDelivered);
   const onTime = delivered.map(deliveredOnTime).filter((value): value is boolean => value !== null);
-  const tat = delivered.map((row) => Number(row.tat_days)).filter(Number.isFinite);
+  const tat = delivered.map((row) => row.tat_days == null ? null : Number(row.tat_days)).filter((value): value is number => value !== null && Number.isFinite(value));
   const exceptions = rows.filter((row) => !isDelivered(row) && cleanStatus(row) !== "Cancelled" && (Number(row.ageing_days || 0) > 4 || Number(row.attempts || 0) > 1 || ["Lost / Damaged", "NDR / Undelivered"].includes(cleanStatus(row))));
   return {
     total: rows.length,
