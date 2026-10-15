@@ -41,9 +41,10 @@ Useful SHARV demo queries:
 1. Create a Supabase project.
 2. In Supabase SQL Editor, run [`supabase/schema.sql`](supabase/schema.sql).
 3. Then run [`supabase/base_raw_upload.sql`](supabase/base_raw_upload.sql). This adds restricted upload staging and an administrator-only transactional finalizer. Base Raw Data replacement is not enabled until this migration has been applied.
-4. In Authentication settings, disable public sign-up. Invite the approved users manually.
-5. At the bottom of `supabase/schema.sql`, replace the two example emails and run the two slot-assignment statements. Those two UUID-backed slots are the only identities that can upload or mutate shipment/SLA data.
-6. Copy `config.example.js` to `config.js` and set the project URL and browser-safe publishable/anon key:
+4. Run [`supabase/clear_active_dataset.sql`](supabase/clear_active_dataset.sql) to enable the primary-user-only Clear data button. It clears shipment rows and upload history, and returns stored source-file paths for removal through the private storage API.
+5. In Authentication settings, disable public sign-up. Invite the approved users manually.
+6. At the bottom of `supabase/schema.sql`, replace the two example emails and run the two slot-assignment statements. Those two UUID-backed slots are the only identities that can upload or mutate shipment/SLA data.
+7. Copy `config.example.js` to `config.js` and set the project URL and browser-safe publishable/anon key:
 
    ```js
    window.SHARV_CONFIG = {

@@ -1399,6 +1399,54 @@
     });
   }
 
+  function openClearDataModal() {
+    if (state.role !== "upload_admin") return;
+    const shipmentCount = state.shipments.length;
+    openModal(`<header class="modal-head"><div><p class="eyebrow">Primary user access</p><h2 id="modalTitle">Remove current data?</h2><p>This permanently removes the shared shipment dataset for every dashboard user.</p></div><button class="icon-button" type="button" data-close-modal aria-label="Close">${icon("close")}</button></header><div class="modal-body"><div class="risk-banner">${icon("alert")}<div><b>${formatNumber(shipmentCount)} shipment rows will be removed</b><span>Upload history and its stored source files will also be removed. Saved views and SLA rules will stay in place.</span></div></div><label class="field" style="margin-top:16px"><span>Type CLEAR to confirm</span><input id="clearDataConfirmText" type="text" autocomplete="off" placeholder="CLEAR"></label></div><footer class="modal-actions"><button class="button secondary" type="button" data-close-modal>Cancel</button><button class="button danger" type="button" id="confirmClearData" disabled>Remove current data</button></footer>`);
+    const input = $("#clearDataConfirmText");
+    const confirmButton = $("#confirmClearData");
+    input.addEventListener("input", () => { confirmButton.disabled = input.value.trim().toUpperCase() !== "CLEAR"; });
+    confirmButton.addEventListener("click", () => { void clearCurrentData(confirmButton); });
+  }
+
+  async function clearCurrentData(button) {
+    if (state.role !== "upload_admin" || button.disabled) return;
+    button.disabled = true;
+    button.textContent = "Removing data…";
+    try {
+      let sourcePaths = [];
+      if (!state.demo) {
+        const { data, error } = await state.supabase.rpc("clear_active_dataset");
+        if (error) throw error;
+        sourcePaths = Array.isArray(data) ? data.filter((path) => typeof path === "string" && path) : [];
+      }
+      state.shipments = [];
+      state.filters = { couriers: [], states: [], statuses: [], customers: [], from: "", to: "" };
+      state.dataUpdatedAt = new Date();
+      applyFilters();
+      $("#exceptionBadge").textContent = "0";
+      closeModal();
+      renderRoute();
+      if (sourcePaths.length) {
+        const { error } = await state.supabase.storage.from("raw-uploads").remove(sourcePaths);
+        if (error) {
+          console.warn("Shipment data was cleared, but stored source files could not be fully removed", error);
+          toast("Data cleared with a storage warning", "Shipment rows are gone, but some original upload files may remain in private storage.", "error");
+          return;
+        }
+      }
+      toast("Current data removed", "The shared shipment data and available source files have been cleared.");
+    } catch (error) {
+      console.error(error);
+      button.disabled = false;
+      button.textContent = "Remove current data";
+      const migrationHint = /clear_active_dataset|schema cache|could not find the function/i.test(error.message || "")
+        ? " Apply supabase/clear_active_dataset.sql in the Supabase SQL Editor, then retry."
+        : "";
+      toast("Could not remove current data", `${error.message || "The request failed."}${migrationHint}`, "error");
+    }
+  }
+
   function openUploadModal() {
     if (state.role !== "upload_admin") { toast("Upload restricted", "Only the two primary users can add or replace shipment data.", "error"); return; }
     openModal(`<header class="modal-head"><div><p class="eyebrow">Primary user access</p><h2 id="modalTitle">Upload shipment data</h2><p>Base Raw Data replaces the active dataset only after validation and atomic cloud finalization.</p></div><button class="icon-button" type="button" data-close-modal aria-label="Close">${icon("close")}</button></header><div class="modal-body"><label class="field"><span>Data source</span><select id="uploadSource"><option value="Base Raw Data">Base Raw Data · replace active dataset</option><option value="ITL">ITL courier export · merge</option><option value="Blitz">Blitz courier export · merge</option><option value="Other">Other / normalized template · merge</option></select></label><div class="drop-zone" id="dropZone" role="button" tabindex="0">${icon("package")}<b>Drop an XLSX, XLS, or CSV file here</b><span>or click to choose a file · up to 25 MB</span></div><div id="selectedFile"></div><div class="risk-banner" style="margin:14px 0 0">${icon("check")}<div><b>Cloud access is policy-controlled</b><span>Only two UUID-based primary slots can write. All authenticated users can view and download.</span></div></div></div><footer class="modal-actions"><button class="button secondary" type="button" data-close-modal>Cancel</button><button class="button primary" type="button" id="startUpload" disabled>Validate & upload</button></footer>`);
@@ -2064,6 +2112,7 @@
     $("#commandButton").addEventListener("click", () => navigate("sharv"));
     $("#filterButton").addEventListener("click", openFilters);
     $("#uploadButton").addEventListener("click", openUploadModal);
+    $("#clearDataButton").addEventListener("click", openClearDataModal);
     $("#exportButton").addEventListener("click", (event) => openMenu(event.currentTarget, [
       { label: activeFilterCount() ? "Download filtered raw data" : "Download complete raw data", hint: `${formatNumber(state.filtered.length)} shipment rows`, action: activeFilterCount() ? "global-filtered" : "global-complete", icon: "file" },
       ...(activeFilterCount() ? [{ label: "Download complete raw data", hint: `${formatNumber(state.shipments.length)} authorized rows`, action: "global-complete", icon: "file" }] : []),
@@ -2093,6 +2142,7 @@
     $("#userAvatar").textContent = initials || "DU";
     $("#userRole").textContent = state.role === "upload_admin" ? "Primary · Upload access" : "Viewer · Download access";
     $("#uploadButton").hidden = state.role !== "upload_admin";
+    $("#clearDataButton").hidden = state.role !== "upload_admin";
     $("#sidebarSync").textContent = state.demo ? "Demo data" : `Updated ${formatDate(state.dataUpdatedAt, { short: true })}`;
     const route = location.hash.slice(1);
     navigate(ROUTES[route] ? route : "overview", false);
