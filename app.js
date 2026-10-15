@@ -2074,6 +2074,7 @@
       { separator: true },
       { label: "Sign out", action: "sign-out", icon: "close", danger: true }
     ], "user"));
+    $("#signOutButton").addEventListener("click", () => { void signOut(); });
     $("#modalBackdrop").addEventListener("click", closeModal);
     $("#fileInput").addEventListener("change", (event) => selectUploadFile(event.target.files[0]));
     document.addEventListener("keydown", (event) => {

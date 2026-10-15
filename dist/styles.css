@@ -92,9 +92,14 @@ svg { display: block; width: 18px; height: 18px; fill: none; stroke: currentColo
 .sharv-spark { display: grid; flex: 0 0 auto; place-items: center; width: 28px; height: 28px; color: #8fb0ff; background: #1e376a; border-radius: 7px; }
 .sharv-spark svg { width: 15px; height: 15px; }
 .sidebar-footer { padding: 12px 10px; border-top: 1px solid #1c2a40; }
+.sidebar-account-actions { display: grid; gap: 6px; }
 .user-card { appearance: none; display: flex; align-items: center; width: 100%; gap: 10px; padding: 8px; color: #dce4f2; background: transparent; border: 0; border-radius: 8px; cursor: pointer; text-align: left; }
 .user-card:hover { background: #142239; }
 .user-card > svg { width: 15px; height: 15px; color: #74839a; }
+.signout-button { appearance: none; display: flex; align-items: center; width: 100%; gap: 8px; min-height: 32px; padding: 7px 9px; color: #ffb3b6; background: transparent; border: 1px solid transparent; border-radius: 8px; cursor: pointer; font: inherit; font-size: .72rem; font-weight: 650; text-align: left; }
+.signout-button:hover { color: #fff; background: rgba(193, 73, 80, .18); border-color: rgba(193, 73, 80, .28); }
+.signout-button:focus-visible { outline: 2px solid #7aa2ff; outline-offset: 1px; }
+.signout-button svg { width: 15px; height: 15px; flex: 0 0 auto; }
 .avatar { display: grid; flex: 0 0 auto; place-items: center; width: 34px; height: 34px; color: #dce8ff; background: #263c64; border-radius: 50%; font-size: .7rem; font-weight: 760; }
 .user-copy { min-width: 0; flex: 1; }
 .user-copy b, .user-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
