@@ -25,10 +25,7 @@ create table storage.objects(id uuid default gen_random_uuid(),bucket_id text,na
 alter table storage.objects enable row level security;
 create function storage.foldername(text) returns text[] language sql as $$ select string_to_array($1,'/') $$;`);
 await db.exec(
-  await readFile(
-    new URL("../supabase/schema.sql", import.meta.url),
-    "utf8",
-  ),
+  await readFile(new URL("../supabase/schema.sql", import.meta.url), "utf8"),
 );
 console.log("PASS migration executes in PostgreSQL");
 const primary = "11111111-1111-4111-8111-111111111111",
@@ -219,4 +216,120 @@ assert.equal(
 console.log(
   "PASS event RPC restricted; deduplication, timestamp ordering, four terminal guards, Cancelled update",
 );
+// Upgrade an existing installation, including repeat execution, without changing users or source archives.
+await db.exec(
+  "reset role; alter table public.next_shipments drop column details",
+);
+const upgrade = await readFile(
+  new URL("../supabase/migrations/20261026_report_v2.sql", import.meta.url),
+  "utf8",
+);
+await db.exec(upgrade);
+await db.exec(upgrade);
+await setUser(viewer);
+await fails(() => db.query("select public.next_reprocess($1,2,'{}')", [batch]));
+await setUser(other);
+await fails(() => db.query("select public.next_reprocess($1,2,'{}')", [batch]));
+await setUser(primary);
+await db.query("select public.next_reprocess($1,2,'{\"mapping_version\":2}')", [
+  batch,
+]);
+const repaired = staged.map((r) => ({
+  ...r,
+  city: "Pune",
+  details: {
+    mapping_version: 2,
+    master_courier: "Master",
+    lines: [
+      { product: "One", quantity: 2 },
+      { product: "Two", quantity: 2 },
+    ],
+  },
+  quantity: 4,
+}));
+// A stale report must enrich metadata while leaving the existing terminal status protected.
+repaired[1].status = "In Transit";
+await db.query("select public.next_stage($1,$2)", [
+  batch,
+  JSON.stringify(repaired),
+]);
+await db.query("select public.next_finalize($1)", [batch]);
+const fixed = (
+  await db.query("select * from public.next_shipments where awb='0002'")
+).rows[0];
+assert.equal(fixed.status, "Delivered");
+assert.equal(fixed.city, "Pune");
+assert.equal(fixed.details.lines.length, 2);
+assert.equal(Number(fixed.quantity), 4);
+assert.equal(
+  (await db.query("select public.next_is_primary() p")).rows[0].p,
+  true,
+);
+await db.exec("reset role");
+assert(
+  (await db.query("select count(*)::int n from private.next_import_snapshots"))
+    .rows[0].n >= 2,
+);
+console.log(
+  "PASS existing-database upgrade, safe rerun, owner-only reprocessing, terminal metadata repair, snapshots",
+);
+if (process.env.SHARV_REPORT) {
+  const { runImport } = await import("./import-helper.mjs");
+  const { readFileSync } = await import("node:fs");
+  const report = await runImport(readFileSync(process.env.SHARV_REPORT));
+  assert(!report.error, report.error);
+  const p = primary + "/" + report.hash + ".gz";
+  await db.query(
+    "insert into storage.objects(bucket_id,name) values('shiprocket-sources',$1)",
+    [p],
+  );
+  await setUser(primary);
+  const id = (
+    await db.query(
+      "insert into public.next_imports(filename,object_path,sha256,original_bytes,compressed_bytes,source_rows,expected_shipments) values('private-local-test.csv',$1,$2,1,1,$3,$4) returning id",
+      [p, report.hash, report.sourceRows, report.rows.length],
+    )
+  ).rows[0].id;
+  await db.exec("reset role");
+  const rounded = new Map(
+    report.rows
+      .filter((r) => r.details.awb_issue)
+      .map((r) => [r.details.source_awb, r]),
+  );
+  for (const [awb, r] of rounded)
+    await db.query(
+      "insert into public.next_shipments(shipment_key,awb,order_id,import_id,status) values($1,$2,$3,$4,$5)",
+      ["awb:" + awb, awb, r.order_id, batch, r.status],
+    );
+  await setUser(primary);
+  for (let i = 0; i < report.rows.length; i += 300)
+    await db.query("select public.next_stage($1,$2)", [
+      id,
+      JSON.stringify(report.rows.slice(i, i + 300)),
+    ]);
+  await db.query("select public.next_finalize($1)", [id]);
+  const actual = (
+    await db.query(
+      "select count(*)::int total,count(distinct order_id)::int orders,sum(quantity)::int units,sum(jsonb_array_length(details->'lines'))::int lines from public.next_shipments where import_id=$1",
+      [id],
+    )
+  ).rows[0];
+  assert.deepEqual(actual, {
+    total: 691,
+    orders: 691,
+    units: 1819,
+    lines: 911,
+  });
+  assert.equal(
+    (
+      await db.query(
+        "select count(*)::int n from public.next_shipments where awb ~* 'e[+]11'",
+      )
+    ).rows[0].n,
+    0,
+  );
+  console.log(
+    "PASS actual private report through PostgreSQL staging/finalize: 691 orders, 911 lines, 1819 units",
+  );
+}
 await db.close();

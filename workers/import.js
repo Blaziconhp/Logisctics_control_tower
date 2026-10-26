@@ -1,12 +1,13 @@
 importScripts("../vendor/xlsx.full.min.js");
 self.onmessage = async ({ data }) => {
   try {
-    const { normalizeRow, header } = await import("../lib/model.mjs");
+    const { normalizeRow, header } = await import("../lib/model.mjs?v=report2");
     const bytes = data.bytes;
     const workbook = XLSX.read(bytes, {
       type: "array",
       cellDates: false,
       cellText: true,
+      raw: true,
     });
     const groups = new Map(),
       errors = [],
@@ -15,7 +16,7 @@ self.onmessage = async ({ data }) => {
     for (const name of workbook.SheetNames) {
       const matrix = XLSX.utils.sheet_to_json(workbook.Sheets[name], {
         header: 1,
-        raw: false,
+        raw: true,
         defval: "",
         blankrows: true,
         range: 0,
@@ -53,6 +54,7 @@ self.onmessage = async ({ data }) => {
           existing = groups.get(row.shipment_key);
         if (existing) {
           existing.source_refs.push(...row.source_refs);
+          existing.details.lines.push(...row.details.lines);
           existing.quantity = (existing.quantity || 0) + (row.quantity || 0);
         } else groups.set(row.shipment_key, row);
       }
@@ -71,9 +73,18 @@ self.onmessage = async ({ data }) => {
         const awb = [...orderAwbs.get(row.order_id)][0],
           target = groups.get(`awb:${awb}`);
         target.source_refs.push(...row.source_refs);
+        target.details.lines.push(...row.details.lines);
         target.quantity = (target.quantity || 0) + (row.quantity || 0);
         groups.delete(key);
       }
+    }
+    for (const row of groups.values()) {
+      row.product = [
+        ...new Set(row.details.lines.map((l) => l.product).filter(Boolean)),
+      ].join("; ");
+      row.sku = [
+        ...new Set(row.details.lines.map((l) => l.sku).filter(Boolean)),
+      ].join("; ");
     }
     if (!groups.size)
       throw new Error(

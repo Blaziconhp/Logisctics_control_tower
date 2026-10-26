@@ -1,10 +1,30 @@
+import {
+  enrich,
+  matches,
+  summarize,
+  metrics,
+  groupMetrics,
+  ledgerExport,
+  rawLines,
+  findIdentifiers,
+  day,
+} from "./lib/analytics.mjs?v=report2";
+import {
+  label,
+  table,
+  menu,
+  performanceView,
+  queueAnalysis,
+  customBuilder,
+  customRows,
+} from "./lib/views.mjs?v=report2";
 import { createDemoShipments } from "./lib/demo.mjs";
 import {
   escapeHtml as e,
   csv,
   TERMINAL,
   selectSourceRows,
-} from "./lib/model.mjs";
+} from "./lib/model.mjs?v=report2";
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
 const iconPaths = {
@@ -56,7 +76,7 @@ const routes = {
     "Compare outcomes across carriers, destinations, and accounts.",
   ],
   studio: [
-    "Saved views",
+    "Custom view",
     "Reusable definitions that recalculate with your latest data.",
   ],
   sharv: ["Ask SHARV", "Grounded answers from your authorized shipment data."],
@@ -73,7 +93,12 @@ const state = {
   page: 0,
   cursors: [0],
   hasNext: false,
-  dimension: "courier",
+  dimension: "master_courier",
+  queue: "lm",
+  tables: {},
+  dataset: null,
+  datasetPromise: null,
+  customDefinition: null,
   generation: 0,
   sessionGeneration: 0,
   demo: false,
@@ -113,110 +138,66 @@ async function rpc(name, args = {}) {
 function currentFilter() {
   return {
     ...state.filter,
-    ...(state.route === "exceptions" ? { exceptions: true } : {}),
+    ...(state.route === "exceptions" ? { queue: state.queue } : {}),
   };
 }
-const demoShipments = createDemoShipments();
-const demoData = () => demoShipments;
-function demoScope(f) {
-  return demoData().filter(
-    (r) =>
-      (!f.from || r.order_date.slice(0, 10) >= f.from) &&
-      (!f.to || r.order_date.slice(0, 10) <= f.to) &&
-      ["courier", "state", "status", "customer"].every(
-        (k) => !f[k] || r[k] === f[k],
-      ) &&
-      (!f.q ||
-        Object.values(r).join(" ").toLowerCase().includes(f.q.toLowerCase())) &&
-      (!f.ids || f.ids.includes(r.awb) || f.ids.includes(r.order_id)) &&
-      (!f.exceptions || isException(r)) &&
-      (!f.overdue ||
-        (!TERMINAL.has(r.status) && r.edd && new Date(r.edd) < new Date())),
-  );
-}
-function isException(r) {
-  return (
-    ["Lost", "Damaged", "Undelivered"].includes(r.status) ||
-    (!TERMINAL.has(r.status) &&
-      ((r.edd && new Date(r.edd) < new Date()) || r.attempts >= 2))
-  );
-}
-function demoSummary(f, dimension) {
-  const rows = demoScope(f),
-    count = (fn) => rows.filter(fn).length;
-  const groups = new Map(),
-    outcomes = new Map(),
-    months = new Map(),
-    days = new Map();
-  for (const r of rows) {
-    const dim =
-      dimension === "month"
-        ? r.order_date.slice(0, 7)
-        : r[dimension] || "Unknown";
-    if (!groups.has(dim))
-      groups.set(dim, {
-        dimension: dim,
-        total: 0,
-        delivered: 0,
-        rto: 0,
-        open: 0,
-        freight: 0,
-      });
-    const g = groups.get(dim);
-    g.total++;
-    g.delivered += r.status === "Delivered";
-    g.rto += r.status === "RTO Delivered";
-    g.open += !TERMINAL.has(r.status);
-    g.freight += r.freight || 0;
-    outcomes.set(r.status, (outcomes.get(r.status) || 0) + 1);
-    const m = r.order_date.slice(0, 7);
-    months.set(m, (months.get(m) || 0) + 1);
-    const d = r.order_date.slice(0, 10);
-    days.set(d, (days.get(d) || 0) + 1);
+const demoShipments = createDemoShipments().map((r) => ({
+  ...r,
+  details: {
+    master_courier: r.courier,
+    zone: ["z_a", "z_b", "z_c", "z_d"][r.id % 4],
+    lines: [{ product: r.product, sku: r.sku, quantity: r.quantity }],
+    pickup_attempt_date: r.pickup_date,
+  },
+}));
+async function dataset() {
+  if (state.dataset) return enrich(state.dataset);
+  if (!state.datasetPromise) {
+    const session = state.sessionGeneration;
+    const promise = (async () => {
+      let rows = [];
+      if (state.demo) rows = demoShipments;
+      else {
+        let after = 0;
+        for (;;) {
+          const batch = await rpc("next_page", {
+            p_filter: {},
+            p_after: after,
+            p_limit: 1000,
+          });
+          if (session !== state.sessionGeneration)
+            throw new Error("Session changed. Please retry.");
+          if (!Array.isArray(batch))
+            throw new Error("Invalid shipment response");
+          rows.push(...batch);
+          if (batch.length < 1000) break;
+          const next = batch.at(-1).id;
+          if (next <= after) throw new Error("Shipment paging did not advance");
+          after = next;
+        }
+      }
+      if (session === state.sessionGeneration) state.dataset = rows;
+      return rows;
+    })();
+    state.datasetPromise = promise;
+    promise
+      .finally(() => {
+        if (state.datasetPromise === promise) state.datasetPromise = null;
+      })
+      .catch(() => {});
   }
-  return {
-    kpi: {
-      total: rows.length,
-      delivered: count((r) => r.status === "Delivered"),
-      rto: count((r) => r.status === "RTO Delivered"),
-      open: count((r) => !TERMINAL.has(r.status)),
-      exceptions: count(isException),
-      sla_known: count(
-        (r) => r.status === "Delivered" && r.edd && r.delivered_date,
-      ),
-      on_time: count(
-        (r) =>
-          r.status === "Delivered" &&
-          r.edd &&
-          r.delivered_date &&
-          r.delivered_date <= r.edd,
-      ),
-      dates_known: rows.length,
-      freight: rows.reduce((s, r) => s + r.freight, 0),
-      freight_known: rows.length,
-      updated: "2026-09-30T12:00:00Z",
-    },
-    groups: [...groups.values()]
-      .sort((a, b) => b.total - a.total)
-      .slice(0, 100),
-    outcomes: [...outcomes].map(([status, total]) => ({ status, total })),
-    months: [...months].map(([month, total]) => ({ month, total })),
-    days: [...days]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([day, total]) => ({ day, total })),
-  };
+  return enrich(await state.datasetPromise);
 }
 async function summary(filter = currentFilter(), dimension = state.dimension) {
-  return state.demo
-    ? demoSummary(filter, dimension)
-    : rpc("next_summary", { p_filter: filter, p_dimension: dimension });
+  return summarize(
+    (await dataset()).filter((r) => matches(r, filter)),
+    dimension,
+  );
 }
 async function page(filter = currentFilter(), after = 0, limit = 50) {
-  return state.demo
-    ? demoScope(filter)
-        .filter((r) => r.id > after)
-        .slice(0, limit)
-    : rpc("next_page", { p_filter: filter, p_after: after, p_limit: limit });
+  return (await dataset())
+    .filter((r) => r.id > after && matches(r, filter))
+    .slice(0, limit);
 }
 function kpis(k) {
   const cards = [
@@ -249,9 +230,9 @@ function kpis(k) {
       "blue",
     ],
     [
-      "RTO delivered",
+      "RTO shipments",
       pct(k.rto, k.total),
-      `${n(k.rto)} completed returns`,
+      `${n(k.rto)} shipments in RTO`,
       "return",
       "red",
     ],
@@ -259,7 +240,7 @@ function kpis(k) {
   return `<section class="kpis" aria-label="Shipment metrics">${cards.map(([label, value, note, symbol, tone]) => `<article class="kpi ${tone}"><div class="kpi-head"><label>${label}</label><span class="kpi-icon">${icon(symbol)}</span></div><strong>${value}</strong><p><span class="metric-dot"></span>${note}</p></article>`).join("")}</section>`;
 }
 function groupTable(groups, dimension, drill = true) {
-  return `<div class="table-wrap"><table><thead><tr><th>${e(dimension)}</th><th>Shipments</th><th>Delivered</th><th>Delivery rate</th><th>RTO delivered</th><th>Open</th></tr></thead><tbody>${groups.map((g) => `<tr><td>${drill && ["courier", "state", "customer", "status"].includes(dimension) && g.dimension !== "Unknown" ? `<button data-drill="${e(dimension)}" data-value="${e(g.dimension)}">${e(g.dimension)} ↗</button>` : e(g.dimension)}</td><td>${n(g.total)}</td><td>${n(g.delivered)}</td><td>${pct(g.delivered, g.total)}</td><td>${n(g.rto)}</td><td>${n(g.open)}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>${e(label(dimension))}</th><th>Shipments</th><th>Delivered</th><th>Delivery rate</th><th>RTO shipments</th><th>Open</th></tr></thead><tbody>${groups.map((g) => `<tr><td>${drill && ["master_courier", "courier", "state", "city", "customer", "status"].includes(dimension) && g.dimension !== "Unknown" ? `<button data-drill="${e(dimension)}" data-value="${e(g.dimension)}">${e(g.dimension)} ↗</button>` : e(g.dimension)}</td><td>${n(g.total)}</td><td>${n(g.delivered)}</td><td>${pct(g.delivered, g.total)}</td><td>${n(g.rto)}</td><td>${n(g.open)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 function overview(s) {
   const k = s.kpi,
@@ -274,26 +255,57 @@ function overview(s) {
     .join(",");
   const daily = !!s.days?.length;
   const months = daily
-      ? s.days
-          .slice(-31)
-          .map((x) => ({
-            month:
-              x.day.slice(8) +
-              " " +
-              new Date(x.day + "T12:00:00Z").toLocaleDateString("en-GB", {
-                month: "short",
-              }),
-            total: x.total,
-          }))
+      ? s.days.slice(-31).map((x) => ({
+          month:
+            x.day.slice(8) +
+            " " +
+            new Date(x.day + "T12:00:00Z").toLocaleDateString("en-GB", {
+              month: "short",
+            }),
+          total: x.total,
+        }))
       : s.months.slice(-10),
     max = Math.max(1, ...months.map((m) => m.total));
-  return `<div class="network-brief"><div class="brief-icon">${icon("spark")}</div><div><b>Your network at a glance</b><p>${n(k.total)} shipments in scope · ${n(k.exceptions)} need operational review</p></div><button data-go="exceptions">Review action queue ${icon("arrow")}</button></div>${kpis(k)}<div class="grid"><article class="card"><header class="card-head"><div><h3>Shipment volume</h3><p>${daily ? "Daily order volume · latest 31 available dates" : "Order-date volume · latest 10 available months"}</p></div><button data-export-summary="${daily ? "days" : "months"}" aria-label="Export shipment volume">↓ CSV</button></header><div class="card-body"><div class="chart-bars" role="img" aria-label="Shipment counts by order date">${months.map((m, i) => `<div class="chart-col" title="${e(m.month)}: ${n(m.total)} shipments"><b>${n(m.total)}</b><div class="bar" style="height:${Math.max(2, (125 * m.total) / max)}px"></div><small>${daily ? (i % 4 === 0 ? e(m.month) : "&nbsp;") : e(m.month)}</small></div>`).join("")}</div><p class="chart-caption">${n(k.dates_known)} of ${n(k.total)} records have an order date. Counts use the current filters.</p></div></article><article class="card"><header class="card-head"><div><h3>Delivery outcomes</h3><p>Current shipment status</p></div><button data-export-summary="outcomes" aria-label="Export delivery outcomes">↓ CSV</button></header><div class="card-body outcome"><div class="ring" style="background:conic-gradient(${stops || "#edf2ee 0% 100%"})"><div>${pct(k.delivered, k.total)}<small>DELIVERED</small></div></div><div class="legend">${s.outcomes.map((o, i) => `<p><span><i style="background:${colors[i % colors.length]}"></i>${e(o.status)}</span><b>${n(o.total)}</b></p>`).join("")}</div></div></article></div><div class="grid"><article class="card"><header class="card-head"><div><h3>Your operational brief</h3><p>Observed signals, with clear next steps</p></div><span class="badge">CURRENT SCOPE</span></header><div class="insight"><span>⚑</span><div><h3>${n(k.exceptions)} shipments need review</h3><p>Recorded loss, damage or non-delivery; overdue EDDs; or two-plus attempts on a nonterminal shipment.</p></div><button data-go="exceptions" aria-label="Open action queue">↗</button></div><div class="insight"><span>◷</span><div><h3>${pct(k.sla_known, k.delivered)} SLA evidence coverage</h3><p>On-time performance uses only delivered shipments with both promised and actual delivery dates. No target is guessed.</p></div></div><div class="insight"><span>↩</span><div><h3>${n(k.rto)} returns completed</h3><p>${pct(k.rto, k.total)} of this scope is RTO delivered. A recorded return reason is needed to explain why.</p></div></div></article><article class="card"><header class="card-head"><div><h3>Carrier snapshot</h3><p>Largest carriers by shipment volume</p></div><button data-go="performance">Explore ↗</button></header>${groupTable(s.groups.slice(0, 5), "courier")}<div class="table-footer">Delivery rate = delivered ÷ all shipments in scope</div></article></div>`;
+  return `<div class="network-brief"><div class="brief-icon">${icon("spark")}</div><div><b>Your network at a glance</b><p>${n(k.total)} shipments in scope · ${n(k.exceptions)} need operational review</p></div><button data-go="exceptions">Review action queue ${icon("arrow")}</button></div>${kpis(k)}<div class="grid"><article class="card"><header class="card-head"><div><h3>Shipment volume</h3><p>${daily ? "Daily order volume · latest 31 available dates" : "Order-date volume · latest 10 available months"}</p></div><button data-export-summary="${daily ? "days" : "months"}" aria-label="Export shipment volume">↓ CSV</button></header><div class="card-body"><div class="chart-bars" role="img" aria-label="Shipment counts by order date">${months.map((m, i) => `<div class="chart-col" title="${e(m.month)}: ${n(m.total)} shipments"><b>${n(m.total)}</b><div class="bar" style="height:${Math.max(2, (125 * m.total) / max)}px"></div><small>${daily ? (i % 4 === 0 ? e(m.month) : "&nbsp;") : e(m.month)}</small></div>`).join("")}</div><p class="chart-caption">${n(k.dates_known)} of ${n(k.total)} records have an order date. Counts use the current filters.</p></div></article><article class="card"><header class="card-head"><div><h3>Delivery outcomes</h3><p>Current shipment status</p></div><button data-export-summary="outcomes" aria-label="Export delivery outcomes">↓ CSV</button></header><div class="card-body outcome"><div class="ring" style="background:conic-gradient(${stops || "#edf2ee 0% 100%"})"><div>${pct(k.delivered, k.total)}<small>DELIVERED</small></div></div><div class="legend">${s.outcomes.map((o, i) => `<p><span><i style="background:${colors[i % colors.length]}"></i>${e(o.status)}</span><b>${n(o.total)}</b></p>`).join("")}</div></div></article></div><div class="grid"><article class="card"><header class="card-head"><div><h3>Your operational brief</h3><p>Observed signals, with clear next steps</p></div><span class="badge">CURRENT SCOPE</span></header><div class="insight"><span>⚑</span><div><h3>${n(k.exceptions)} shipments need review</h3><p>Pickup pendency, forward NDR/EDD breaches, and RTO shipments.</p></div><button data-go="exceptions" aria-label="Open action queue">↗</button></div><div class="insight"><span>◷</span><div><h3>${pct(k.sla_known, k.delivered)} SLA evidence coverage</h3><p>On-time performance uses only delivered shipments with both promised and actual delivery dates. No target is guessed.</p></div></div><div class="insight"><span>↩</span><div><h3>${n(k.rto)} shipments in RTO</h3><p>${pct(k.rto, k.total)} of this scope is in RTO. A recorded return reason is needed to explain why.</p></div></div></article><article class="card"><header class="card-head"><div><h3>Carrier snapshot</h3><p>Largest carriers by shipment volume</p></div><button data-go="performance">Explore ↗</button></header>${groupTable(s.groups.slice(0, 5), "master_courier")}<div class="table-footer">Delivery rate = delivered ÷ all shipments in scope</div></article></div>`;
 }
 function ledger(rows) {
-  return `<div class="toolbar"><input id="ledgerSearch" aria-label="Search shipment ledger" placeholder="Search AWB, order, recipient, destination…" value="${e(state.filter.q || "")}"><button id="runSearch">Search</button>${state.route === "exceptions" ? '<span class="badge">Source-based action queue</span>' : ""}</div><article class="card"><header class="card-head"><div><h3>${state.route === "exceptions" ? "Shipments to review" : "Shipment records"}</h3><p>50 records per page · identifiers remain text</p></div><button id="exportPage">↓ This page</button></header><div class="table-wrap"><table><thead><tr><th>AWB / Order</th><th>Carrier</th><th>Destination</th><th>Status</th><th>Order date</th><th>Attempts</th>${state.route === "exceptions" ? "<th>Observed signal</th>" : ""}</tr></thead><tbody>${rows.map((r) => `<tr><td><button data-detail="${r.id}">${e(r.awb || r.order_id)} ↗</button><br><small>${e(r.order_id)}</small></td><td>${e(r.courier)}</td><td>${e(r.city)}<br><small>${e(r.state)}</small></td><td>${status(r.status)}</td><td>${date(r.order_date)}</td><td>${n(r.attempts)}</td>${state.route === "exceptions" ? `<td>${e(["Lost", "Damaged", "Undelivered"].includes(r.status) ? r.status : r.edd && new Date(r.edd) < new Date() ? "Promised date passed" : "Repeated attempts")}</td>` : ""}</tr>`).join("") || '<tr><td colspan="7">No records match this scope.</td></tr>'}</tbody></table></div><footer class="table-footer"><span>Page ${state.page + 1} · ${rows.length} records shown</span><div><button id="previous" ${state.page === 0 ? "disabled" : ""}>← Previous</button> <button id="next" ${!state.hasNext ? "disabled" : ""}>Next →</button></div></footer></article>`;
+  const cols = [
+    "order_id",
+    "awb",
+    "recipient",
+    "master_courier",
+    "courier",
+    "city",
+    "state",
+    "status",
+    "order_date",
+    "quantity",
+    "attempts",
+    "reason",
+    "buyer_type",
+    ...(state.route === "exceptions"
+      ? ["lm_bucket", "risk", "edd_age_days"]
+      : []),
+  ];
+  state.tables.ledger = rows.length
+    ? state.scopeRows.map((r) =>
+        Object.fromEntries(
+          cols.map((k) => [
+            label(k),
+            k === "order_date" ? date(r[k]) : (r[k] ?? null),
+          ]),
+        ),
+      )
+    : [];
+  return `<div class="toolbar"><input id="ledgerSearch" aria-label="Search shipment ledger" placeholder="Search order ID, AWB, customer, destination…" value="${e(state.filter.q || "")}"><button id="runSearch">Search</button></div><article class="card"><header class="card-head"><div><h3>Shipment records</h3><p>50 per page · product quantities summed per shipment · ${n(state.scopeRows.length)} in scope</p></div>${menu()}</header><div class="table-wrap"><table><thead><tr>${cols.map((k) => `<th>${e(label(k))}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${cols.map((k) => `<td>${k === "order_id" ? `<button data-detail="${r.id}">${e(r.order_id || r.awb)} ↗</button>` : k === "status" ? status(r.status) : k === "order_date" ? date(r[k]) : e(k === "awb" && r.awb_issue ? "Source AWB needs correction" : (r[k] ?? "—"))}</td>`).join("")}</tr>`).join("") || `<tr><td colspan="${cols.length}">No matching records.</td></tr>`}</tbody></table></div><footer class="table-footer"><span>Page ${state.page + 1} · ${rows.length} shown</span><div><button id="previous" ${state.page === 0 ? "disabled" : ""}>← Previous</button><button id="next" ${!state.hasNext ? "disabled" : ""}>Next →</button></div></footer></article>`;
 }
-function performance(s) {
-  return `${kpis(s.kpi)}<div class="toolbar"><label>Compare by<select id="dimension">${["courier", "state", "city", "customer", "month", "product", "warehouse", "payment", "status"].map((d) => `<option ${state.dimension === d ? "selected" : ""}>${d}</option>`).join("")}</select></label></div><article class="card"><header class="card-head"><div><h3>Performance scorecard</h3><p>Top 100 groups by volume · rates include all outcomes in each group</p></div><button data-export-summary="groups">↓ Computed CSV</button></header>${groupTable(s.groups, state.dimension)}<footer class="table-footer">Group totals are exact. Groups beyond the first 100 are excluded from this table.</footer></article>`;
+function performance() {
+  return performanceView(
+    state.scopeRows,
+    state.dimension,
+    state.tables,
+    state.tableSources,
+  );
 }
 async function loadViews() {
   if (state.demo) return state.views;
@@ -307,7 +319,28 @@ async function loadViews() {
 }
 async function studio() {
   await loadViews();
-  return `<div class="studio-grid"><article class="card"><header class="card-head"><h3>Create a saved view</h3></header><form id="viewForm" class="card-body view-form"><label>Name<input name="name" maxlength="80" required placeholder="Weekly carrier review"></label><label>Group by<select name="dimension">${["courier", "state", "city", "customer", "month", "status", "product"].map((d) => `<option>${d}</option>`).join("")}</select></label><p class="muted">Saves current global filters and grouping. Results recalculate from current records each time.</p><button class="primary">Save current definition</button></form></article><article class="card"><header class="card-head"><div><h3>Your saved views</h3><p>Private to your signed-in user</p></div></header>${state.views.map((v) => `<div class="saved-item"><button data-view="${e(v.id)}">${e(v.name)} ↗</button><button data-delete-view="${e(v.id)}" aria-label="Delete ${e(v.name)}">×</button></div>`).join("") || '<div class="card-body"><p>No saved views yet. Start with a useful filtered comparison.</p></div>'}</article></div>`;
+  return customBuilder(
+    state.scopeRows,
+    state.views,
+    state.customDefinition,
+    state.tables,
+    state.tableSources,
+  );
+}
+function readCustom(form) {
+  const f = new FormData(form);
+  return {
+    name: f.get("name"),
+    source: f.get("source"),
+    type: f.get("type"),
+    dimension: f.get("dimension"),
+    metric: f.get("metric"),
+    aggregate: f.get("aggregate"),
+    field: f.get("field"),
+    columns: f.getAll("columns"),
+    grouped: f.has("grouped"),
+    filter: { ...state.filter },
+  };
 }
 function sharv() {
   return `<section class="chat"><div class="chat-scroll" id="chatScroll"><div class="chat-intro"><span class="welcome-emblem">${icon("spark")}</span><p class="eyebrow">SHIPMENT & SLA INTELLIGENCE</p><h2>How can I help your<br>operations today?</h2><p class="muted">Investigate a shipment, compare performance,<br>or find what needs your attention.</p><div class="chat-prompts">${["Summarize this scope", "Compare carriers", "Which states have the most RTO?", "Show overdue shipments"].map((q) => `<button data-ask="${e(q)}">${e(q)}${icon("arrow")}</button>`).join("")}</div></div><div id="messages" role="log" aria-live="polite"></div></div><form id="askForm"><label class="sr-only" for="sharvQuestion">Ask SHARV</label><textarea id="sharvQuestion" name="question" rows="2" required placeholder="Ask about shipments, carriers, or SLA…"></textarea><button class="primary" aria-label="Send message">${icon("arrow")}</button></form><p class="composer-note">Answers use your selected data scope. Missing evidence is stated.</p></section>`;
@@ -361,6 +394,18 @@ async function render() {
     ? "DEMO WORKSPACE · September 2026 · Synthetic shipments"
     : "Current scope · All metrics, answers, and exports use these filters";
   try {
+    const all = await dataset();
+    if (generation !== state.generation) return;
+    state.scopeRows = all.filter((r) => matches(r, currentFilter()));
+    state.tables = { ledger: ledgerExport(state.scopeRows) };
+    state.tableSources = {};
+    writeFilters(all);
+    $("#queueCount").textContent = n(
+      all.filter((r) => r.fm_pending || r.lm_bucket).length,
+    );
+    $("#scope").textContent = state.demo
+      ? "DEMO · September 2026 · Synthetic data"
+      : `${n(state.scopeRows.length)} shipments · ${n(new Set(state.scopeRows.map((r) => r.order_id).filter(Boolean)).size)} unique orders · Shiprocket created date · Asia/Kolkata`;
     let html;
     if (state.route === "studio") html = await studio();
     else if (["shipments", "exceptions"].includes(state.route)) {
@@ -372,11 +417,29 @@ async function render() {
       if (generation !== state.generation) return;
       state.hasNext = rows.length > 50;
       state.rows = rows.slice(0, 50);
-      html = ledger(state.rows);
+      html =
+        (state.route === "exceptions"
+          ? `<div class="queue-tabs" role="group" aria-label="Action queue type">${[
+              ["fm", "FM pendency"],
+              ["lm", "LM pendency"],
+              ["rto", "RTO Data"],
+            ]
+              .map(
+                ([k, v]) =>
+                  `<button data-queue="${k}" aria-pressed="${state.queue === k}">${v}</button>`,
+              )
+              .join("")}</div>` +
+            queueAnalysis(
+              state.scopeRows,
+              state.queue,
+              state.tables,
+              state.tableSources,
+            )
+          : "") + ledger(state.rows);
     } else {
       const s = await summary(
         currentFilter(),
-        state.route === "overview" ? "courier" : state.dimension,
+        state.route === "overview" ? "master_courier" : state.dimension,
       );
       if (generation !== state.generation) return;
       state.summary = s;
@@ -392,6 +455,11 @@ async function render() {
     }
     if (generation !== state.generation) return;
     $("#content").innerHTML = html;
+    if (!state.demo && all.some((r) => r.details?.mapping_version !== 2))
+      $("#content").insertAdjacentHTML(
+        "afterbegin",
+        '<div class="note migration-note">Some records use the earlier import mapping. A primary user should run the report-v2 database upgrade, then re-upload the original report to restore complete dates, products and destination fields.</div>',
+      );
     $("#live").textContent = `${title} loaded`;
   } catch (err) {
     if (generation === state.generation)
@@ -402,21 +470,36 @@ function resetPage() {
   state.page = 0;
   state.cursors = [0];
 }
-function writeFilters() {
-  const form = $("#filters");
-  for (const key of ["from", "to", "courier", "state", "status", "customer"]) {
-    if (
-      key === "status" &&
-      state.filter[key] &&
-      !form.elements[key].querySelector(
-        `option[value="${CSS.escape(state.filter[key])}"]`,
-      )
-    ) {
-      const opt = new Option(state.filter[key], state.filter[key]);
-      form.elements[key].add(opt);
-    }
-    form.elements[key].value = state.filter[key] || "";
+function writeFilters(all) {
+  if (!all) {
+    dataset()
+      .then(writeFilters)
+      .catch((err) => toast(err.message));
+    return;
   }
+  const keys = [
+    "master_courier",
+    "state",
+    "city",
+    "status",
+    "warehouse",
+    "risk",
+    "reason",
+  ];
+  $("#filters").innerHTML =
+    `<label>Order date from<input name="from" type="date" value="${e(state.filter.from || "")}"></label><label>Order date to<input name="to" type="date" value="${e(state.filter.to || "")}"></label>${keys
+      .map((k) => {
+        const choices = [
+          ...new Set(all.map((r) => r[k] || "Unknown")),
+          ...(k === "status" ? ["NDR", "EDD Breach", "NDR/EDD breach"] : []),
+        ].sort();
+        const chosen = state.filter[k],
+          isAll = chosen === undefined || chosen === "";
+        return `<details class="multi-filter" data-filter="${k}"><summary>${e(label(k))}<small>${isAll ? "All" : Array.isArray(chosen) ? chosen.length + " selected" : e(chosen)}</small></summary><div class="multi-options"><input type="search" class="option-search" placeholder="Find ${e(label(k))}" aria-label="Find ${e(label(k))}"><label><input type="checkbox" data-select-all="${k}" ${isAll ? "checked" : ""}>Select all</label>${choices.map((v) => `<label class="filter-option"><input type="checkbox" name="${k}" value="${e(v)}" ${isAll || (Array.isArray(chosen) ? chosen.includes(v) : chosen === v) ? "checked" : ""}>${e(v)}</label>`).join("")}</div></details>`;
+      })
+      .join(
+        "",
+      )}<button class="primary">Apply</button><button type="reset" class="text">Reset</button>`;
 }
 function download(content, filename, type = "text/csv;charset=utf-8") {
   const url = URL.createObjectURL(
@@ -428,16 +511,8 @@ function download(content, filename, type = "text/csv;charset=utf-8") {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
-async function allRows(filter) {
-  const rows = [];
-  let after = 0;
-  for (;;) {
-    const batch = await page(filter, after, 1000);
-    rows.push(...batch);
-    if (!batch.length || batch.length < 1000) break;
-    after = batch.at(-1).id;
-  }
-  return rows;
+async function allRows(filter = currentFilter()) {
+  return (await dataset()).filter((r) => matches(r, filter));
 }
 async function exportScope() {
   modal(
@@ -449,7 +524,7 @@ async function normalizedExport(button) {
   try {
     toast("Preparing all matching records in pages…");
     const rows = await allRows(currentFilter());
-    download(csv(rows), "sharv-shipments.csv");
+    download(csv(ledgerExport(rows)), "sharv-shipments.csv");
     toast(`${n(rows.length)} shipment records exported.`);
   } catch (err) {
     toast(err.message);
@@ -484,14 +559,14 @@ async function history() {
     `<h2>Source files & imports</h2><p>Latest 100 imports · immutable private originals</p><div class="table-wrap"><table><thead><tr><th>File</th><th>Status</th><th>Rows</th><th>Stored size</th><th>Download</th></tr></thead><tbody>${data.map((b) => `<tr><td>${e(b.filename)}<br><small>${date(b.created_at)}</small></td><td>${e(b.status)}</td><td>${n(b.source_rows)}<br><small>${n(b.rejected_rows)} unmapped</small></td><td>${n(b.compressed_bytes / 1024)} KB<br><small>${pct(b.compressed_bytes, b.original_bytes)} of original</small></td><td><button data-source="${b.id}">Original file ↓</button>${b.status === "staging" && state.primary && b.owner_id === state.user.id ? `<button data-resume="${b.id}">Resume import</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`,
   );
 }
-async function rawExport(button) {
+async function rawExport(button, selectedRows = null) {
   if (state.demo) {
     toast("Synthetic preview has no raw source files.");
     return;
   }
   button.disabled = true;
   try {
-    const rows = await allRows(currentFilter());
+    const rows = selectedRows || (await allRows(currentFilter()));
     const ids = [...new Set(rows.map((r) => r.import_id).filter(Boolean))];
     if (!ids.length) {
       toast(
@@ -514,6 +589,7 @@ async function rawExport(button) {
         book = XLSX.read(await blob.arrayBuffer(), {
           type: "array",
           cellDates: false,
+          raw: true,
         });
       const refs = new Map();
       for (const r of rows.filter((r) => r.import_id === id))
@@ -571,10 +647,14 @@ async function detail(id) {
   const row = state.rows.find((r) => String(r.id) === String(id));
   if (!row) return;
   modal(
-    `<p class="eyebrow">SHIPMENT RECORD</p><h2>${e(row.awb || row.order_id)}</h2>${status(row.status)}<div class="detail-grid">${Object.entries(
+    `<p class="eyebrow">SHIPMENT RECORD</p><h2>${e(row.awb || row.order_id)}</h2>${status(row.status)}<h3>All products · ${n(row.quantity)} units</h3>${table(row.lines || [], ["product", "sku", "quantity"])}<div class="detail-grid">${Object.entries(
       row,
     )
-      .filter(([k]) => !["source_refs", "shipment_key", "id"].includes(k))
+      .filter(
+        ([k, v]) =>
+          !["source_refs", "shipment_key", "id"].includes(k) &&
+          typeof v !== "object",
+      )
       .map(
         ([k, v]) =>
           `<div><small>${e(k.replaceAll("_", " "))}</small>${e(v)}</div>`,
@@ -613,7 +693,7 @@ async function parseFile(file) {
   }
   $("#importReview").innerHTML =
     '<div class="loading">Reading and compressing your report…</div>';
-  const worker = new Worker("./workers/import.js");
+  const worker = new Worker("./workers/import.js?v=report2");
   try {
     const bytes = await file.arrayBuffer();
     const result = await new Promise((resolve, reject) => {
@@ -626,7 +706,7 @@ async function parseFile(file) {
     pendingImport = { ...result, file };
     if (!$("#importReview")) return;
     $("#importReview").innerHTML =
-      `<h3>Ready for review</h3><p>${n(result.sourceRows)} source lines → ${n(result.rows.length)} distinct shipments<br>${n(result.errors.length)} unmapped rows retained in the original archive</p><div class="upload-review">${e(result.sheets.map((s) => `${s.name}: ${s.rows} rows · ${s.recognized ? "mapped" : "archive only; no recognized header"}`).join("\n"))}${result.errors.length ? "\n\n" + e(result.errors.slice(0, 20).join("\n")) : ""}</div><p class="note">Check the mapped sample before confirming. Unknown dates remain empty; missing values are never inferred. Primary users can import valid rows while preserving unmapped source rows in the original.</p><div class="table-wrap"><table><thead><tr><th>AWB</th><th>Merchant order</th><th>Carrier</th><th>Status</th><th>Order date</th></tr></thead><tbody>${result.rows
+      `<h3>Ready for review</h3><p>${n(result.sourceRows)} source lines → ${n(result.rows.length)} distinct shipments · ${n(new Set(result.rows.map((r) => r.order_id).filter(Boolean)).size)} unique orders<br>${n(result.errors.length)} unmapped rows retained in the original archive</p><p class="note">${n(result.rows.filter((r) => r.details?.awb_issue).length)} orders have scientific-notation AWBs. These remain separate by order ID. Re-export their original tracking numbers as text to restore AWB tracking.</p><div class="upload-review">${e(result.sheets.map((s) => `${s.name}: ${s.rows} rows · ${s.recognized ? "mapped" : "archive only; no recognized header"}`).join("\n"))}${result.errors.length ? "\n\n" + e(result.errors.slice(0, 20).join("\n")) : ""}</div><p class="note">Check the mapped sample before confirming. Unknown dates remain empty; missing values are never inferred. Primary users can import valid rows while preserving unmapped source rows in the original.</p><div class="table-wrap"><table><thead><tr><th>AWB</th><th>Merchant order</th><th>Carrier</th><th>Status</th><th>Order date</th></tr></thead><tbody>${result.rows
         .slice(0, 5)
         .map(
           (r) =>
@@ -661,9 +741,20 @@ async function commitImport(button, resumeBatch = null) {
         .eq("sha256", item.hash)
         .maybeSingle();
       if (readError) throw readError;
-      if (existing?.status === "completed") {
-        toast("This exact file has already been imported.");
-        return;
+      if (
+        existing?.status === "completed" ||
+        (existing?.report?.mapping_version !== 2 && existing)
+      ) {
+        await rpc("next_reprocess", {
+          p_import: existing.id,
+          p_expected: item.rows.length,
+          p_report: {
+            mapping_version: 2,
+            sheets: item.sheets,
+            errors: item.errors.slice(0, 100),
+          },
+        });
+        existing.status = "staging";
       }
       if (existing && existing.owner_id !== state.user.id)
         throw new Error(
@@ -682,7 +773,11 @@ async function commitImport(button, resumeBatch = null) {
             source_rows: item.sourceRows,
             rejected_rows: item.errors.length,
             expected_shipments: item.rows.length,
-            report: { sheets: item.sheets, errors: item.errors.slice(0, 100) },
+            report: {
+              mapping_version: 2,
+              sheets: item.sheets,
+              errors: item.errors.slice(0, 100),
+            },
           })
           .select()
           .single();
@@ -721,6 +816,7 @@ async function commitImport(button, resumeBatch = null) {
     progress("Finalizing atomically…");
     await rpc("next_finalize", { p_import: batch.id });
     pendingImport = null;
+    state.dataset = null;
     $("#dialog").close();
     toast(
       "Import completed. All original bytes retained; current shipments reconciled.",
@@ -749,50 +845,156 @@ async function ask(question) {
   button.disabled = true;
   $("#chatScroll").scrollTop = $("#chatScroll").scrollHeight;
   try {
-    const q = question.toLowerCase();
+    const q = question.toLowerCase(),
+      all = await dataset();
+    const exact = findIdentifiers(question, all);
     let answer;
-    const tokens = question.split(/[\s,;]+/).filter(Boolean);
-    const ids = tokens.filter((t) => /\d/.test(t) && /^[a-z0-9_-]+$/i.test(t));
-    if (ids.length) {
-      const rows = await allRows({ ...scopedFilter, ids });
-      answer = `<p>Found ${n(rows.length)} matching shipment records in the current scope.</p>${rows.map((r) => `<p><b>${e(r.awb || r.order_id)}</b> · ${e(r.status)} · ${e(r.courier)} · ${e(r.city)}<br><small>Order ${e(r.order_id)} · promised ${date(r.edd)} · delivered ${date(r.delivered_date)}</small></p>`).join("")}`;
-    } else if (/overdue|delay|exception/.test(q)) {
-      const rows = await page(
-        {
-          ...scopedFilter,
-          ...(/overdue|delay/.test(q)
-            ? { overdue: true }
-            : { exceptions: true }),
-        },
-        0,
-        20,
-      );
-      answer = `<p>Up to 20 matching records in your current scope:</p>${rows.map((r) => `<p>${e(r.awb || r.order_id)} · ${e(r.status)} · EDD ${date(r.edd)} · attempts ${n(r.attempts)}</p>`).join("") || "<p>No matching exceptions.</p>"}<p>I can identify the observed signal. A cause needs recorded remarks or further investigation.</p>`;
-    } else if (
-      /summari|summary|scope|sla|on.time|deliver|compare|carrier|state|city|customer|rto|return/.test(
-        q,
-      )
-    ) {
-      const dimension = /state/.test(q)
-        ? "state"
-        : /city/.test(q)
-          ? "city"
-          : /customer/.test(q)
-            ? "customer"
-            : "courier";
-      const s = await summary(scopedFilter, dimension),
-        k = s.kpi;
-      answer = `<p>Current scope: <b>${n(k.total)}</b> shipments. ${n(k.delivered)} delivered (${pct(k.delivered, k.total)}), ${n(k.rto)} RTO delivered, and ${n(k.open)} nonterminal.</p><p>On-time delivery: ${pct(k.on_time, k.sla_known)} across ${n(k.sla_known)} delivered shipments with promised and actual dates. Missing promises are excluded.</p>`;
-      if (/compare|carrier|state|city|customer|rto|return/.test(q)) {
-        let groups = [...s.groups];
-        if (/rto|return/.test(q)) groups.sort((a, b) => b.rto - a.rto);
-        answer += groupTable(groups.slice(0, 10), dimension, false);
-        answer +=
-          '<p class="muted">Up to 10 groups from the 100 largest groups by shipment volume. Low-volume groups beyond that limit are not ranked.</p>';
-      }
-    } else
+    if (exact.length) {
+      const outside = exact.some((r) => !matches(r, scopedFilter));
       answer =
-        "<p>I can calculate a delivery/SLA summary, compare carriers, states, cities or customer accounts, list exceptions, or look up exact AWBs/order IDs. I could not map this question confidently. Please use one of those forms.</p>";
+        `<p>Found <b>${exact.length}</b> matching shipment${exact.length === 1 ? "" : "s"} across your authorized database.${outside ? " This ID lookup includes records outside the current workspace filters." : ""}</p>` +
+        exact
+          .map(
+            (r) =>
+              `<h3>Order ${e(r.order_id)} · ${e(r.status)}</h3><p>AWB ${e(r.awb)} · ${e(r.master_courier)} / ${e(r.courier)}<br>${e(r.recipient)} · ${e(r.city)}, ${e(r.state)}<br>Order date ${date(r.order_date)} · pickup ${date(r.pickup_date)} · EDD ${date(r.edd)} · delivered ${date(r.delivered_date)}<br>${n(r.quantity)} units · ${n(r.attempts)} attempts · ${e(r.buyer_type)}<br>Reason: ${e(r.reason || "Not provided")}<br>Delivery SLA: ${r.sla_days == null ? "Not available" : n(r.sla_days) + " days"}</p>${table(r.lines || [], ["product", "sku", "quantity"])}`,
+          )
+          .join("");
+    } else {
+      const filter = { ...scopedFilter };
+      // Known entity names select data; user text is never treated as SQL or executable code.
+      for (const key of [
+        "master_courier",
+        "courier",
+        "state",
+        "city",
+        "warehouse",
+        "payment",
+        "recipient",
+      ]) {
+        const found = [
+          ...new Set(all.map((r) => r[key]).filter(Boolean)),
+        ].filter(
+          (v) => String(v).length >= 3 && q.includes(String(v).toLowerCase()),
+        );
+        if (found.length && key !== "recipient") filter[key] = found;
+      }
+      const dates = question.match(/\b\d{4}-\d{2}-\d{2}\b/g);
+      if (dates) {
+        filter.from = dates[0];
+        filter.to = dates[1] || dates[0];
+      }
+      if (/rto|return/.test(q)) filter.queue = "rto";
+      else if (/first.mile|fm pend|pickup pend/.test(q)) filter.queue = "fm";
+      else if (/ndr|undelivered/.test(q)) filter.status = ["Undelivered"];
+      else if (/overdue|edd breach|late shipment/.test(q))
+        filter.overdue = true;
+      let rows = all.filter((r) => matches(r, filter));
+      const dimension = /warehouse|pickup location/.test(q)
+        ? "warehouse"
+        : /state/.test(q)
+          ? "state"
+          : /city/.test(q)
+            ? "city"
+            : /customer|buyer/.test(q)
+              ? "customer_label"
+              : /payment|cod|prepaid/.test(q)
+                ? "payment"
+                : /zone/.test(q)
+                  ? "zone"
+                  : "master_courier";
+      if (
+        /summary|summari|scope|how many|count|total|sla|p90|p95|on.time|deliver|compare|carrier|courier|state|city|customer|rto|return|pickup|warehouse|zone|payment|ndr|breach|overdue/.test(
+          q,
+        )
+      ) {
+        const k = metrics(rows);
+        answer = `<p><b>${n(k.total)} shipments</b> (${n(k.unique_orders)} unique orders) match this question and scope. ${n(k.delivered)} delivered (${pct(k.delivered, k.total)}), ${n(k.intransit)} in transit (${pct(k.intransit, k.total)}), ${n(k.rto)} RTO (${pct(k.rto, k.total)}).</p><p>Average delivery SLA: ${k.avg_transit == null ? "—" : n(k.avg_transit) + " days"}; P90 ${k.p90 == null ? "—" : n(k.p90)}; P95 ${k.p95 == null ? "—" : n(k.p95)} (${n(k.sla_samples)} measured deliveries).<br>On-time pickup: ${pct(k.pickup_on_time, k.pickup_known)} (${n(k.pickup_on_time)}/${n(k.pickup_known)}).<br>On-time delivery: ${pct(k.on_time, k.sla_known)} (${n(k.on_time)}/${n(k.sla_known)}).</p>`;
+        if (/reason|why|list|show.*order|pending|overdue|breach|ndr/.test(q))
+          answer += table(
+            ledgerExport(rows),
+            [
+              "order_id",
+              "awb",
+              "status",
+              "city",
+              "reason",
+              "lm_bucket",
+              "edd_age_days",
+            ],
+            30,
+          );
+        else
+          answer += table(
+            groupMetrics(rows, dimension),
+            [
+              "dimension",
+              "total",
+              "delivered",
+              "intransit",
+              "rto",
+              "avg_transit",
+              "p90",
+              "p95",
+            ],
+            30,
+          );
+        answer +=
+          '<p class="muted">Calculated from all matching records, not just the visible table page. Missing dates are excluded from evidence-based rates.</p>';
+      } else {
+        const terms = q
+          .replace(/[^a-z0-9 _-]/g, " ")
+          .split(/\s+/)
+          .filter(
+            (t) =>
+              t.length > 2 &&
+              ![
+                "find",
+                "show",
+                "details",
+                "order",
+                "about",
+                "please",
+                "the",
+                "for",
+              ].includes(t),
+          );
+        rows = all.filter(
+          (r) =>
+            terms.length &&
+            terms.every((t) =>
+              [
+                r.order_id,
+                r.awb,
+                r.recipient,
+                r.product,
+                r.sku,
+                r.city,
+                r.state,
+                r.master_courier,
+              ]
+                .join(" ")
+                .toLowerCase()
+                .includes(t),
+            ),
+        );
+        answer = rows.length
+          ? `<p>${rows.length} database matches:</p>` +
+            table(
+              ledgerExport(rows),
+              [
+                "order_id",
+                "awb",
+                "recipient",
+                "status",
+                "city",
+                "quantity",
+                "reason",
+              ],
+              30,
+            )
+          : "<p>No matching record found. Paste the complete order ID or AWB, or ask for a courier, destination, pickup, SLA, NDR, or RTO comparison. I will not guess missing records or reasons.</p>";
+      }
+    }
     if (sessionGeneration === state.sessionGeneration && $("#answerPending")) {
       $("#answerPending").innerHTML = answer;
       $("#answerPending").removeAttribute("id");
@@ -818,6 +1020,12 @@ async function establish(session) {
     $("#auth").hidden = false;
     state.primary = false;
     state.rows = [];
+    state.dataset = null;
+    state.datasetPromise = null;
+    state.scopeRows = [];
+    state.tables = {};
+    state.tableSources = {};
+    state.customDefinition = null;
     state.summary = null;
     state.views = [];
     pendingImport = null;
@@ -846,16 +1054,7 @@ async function establish(session) {
     $("#connection").textContent = state.demo
       ? "● Synthetic preview"
       : "● Authenticated";
-    if (state.demo) {
-      for (const [selector, key] of [
-        ["#carriers", "courier"],
-        ["#states", "state"],
-      ])
-        $(selector).innerHTML = [...new Set(demoShipments.map((r) => r[key]))]
-          .sort()
-          .map((v) => `<option value="${e(v)}">`)
-          .join("");
-    }
+
     await render();
   } catch (err) {
     $("#authError").textContent = `Workspace setup incomplete: ${err.message}`;
@@ -871,9 +1070,7 @@ $("#login").onsubmit = async (ev) => {
   $("#authError").textContent = "";
   try {
     if (!state.client)
-      throw new Error(
-        "Connect the new Supabase project first. See SETUP.md.",
-      );
+      throw new Error("Connect the new Supabase project first. See SETUP.md.");
     const { data: result, error } = await state.client.auth.signInWithPassword({
       email: data.get("email"),
       password: data.get("password"),
@@ -948,7 +1145,18 @@ $("#filters").onsubmit = (ev) => {
     toast("From date must be on or before To date.");
     return;
   }
-  state.filter = Object.fromEntries(Object.entries(data).filter(([, v]) => v));
+  const next = {
+    ...state.filter,
+    from: data.from || undefined,
+    to: data.to || undefined,
+  };
+  for (const el of ev.target.querySelectorAll("[data-filter]")) {
+    const k = el.dataset.filter;
+    const inputs = [...el.querySelectorAll(`input[name="${k}"]`)];
+    if (inputs.every((x) => x.checked)) delete next[k];
+    else next[k] = inputs.filter((x) => x.checked).map((x) => x.value);
+  }
+  state.filter = next;
   resetPage();
   render();
 };
@@ -957,7 +1165,10 @@ $("#filters").onreset = () => {
   resetPage();
   setTimeout(render, 0);
 };
-$("#refresh").onclick = () => render();
+$("#refresh").onclick = () => {
+  state.dataset = null;
+  render();
+};
 $("#upload").onclick = openUpload;
 $("#export").onclick = exportScope;
 $("#history").onclick = () => history().catch((err) => toast(err.message));
@@ -975,6 +1186,22 @@ document.addEventListener("click", async (ev) => {
   if (!b) return;
   try {
     if (b.hasAttribute("data-retry")) await render();
+    if (b.dataset.queue) {
+      state.queue = b.dataset.queue;
+      resetPage();
+      await render();
+    }
+    if (b.dataset.raw)
+      await rawExport(b, state.tableSources[b.dataset.raw] || state.scopeRows);
+    if (b.dataset.computed)
+      download(
+        csv(state.tables[b.dataset.computed] || []),
+        `sharv-${b.dataset.computed}.csv`,
+      );
+    if (b.id === "previewCustom") {
+      state.customDefinition = readCustom($("#viewForm"));
+      await render();
+    }
     if (b.dataset.go) location.hash = b.dataset.go;
     if (b.hasAttribute("data-upload")) openUpload();
     if (b.dataset.drill) {
@@ -1009,7 +1236,7 @@ document.addEventListener("click", async (ev) => {
                 Shipments: g.total,
                 Delivered: g.delivered,
                 "Delivery rate": pct(g.delivered, g.total),
-                "RTO delivered": g.rto,
+                "RTO shipments": g.rto,
                 Open: g.open,
               }))
             : state.summary[b.dataset.exportSummary],
@@ -1036,9 +1263,16 @@ document.addEventListener("click", async (ev) => {
     if (b.dataset.view) {
       const v = state.views.find((v) => v.id === b.dataset.view);
       state.filter = v.definition.filter || {};
-      state.dimension = v.definition.dimension || "courier";
+      state.customDefinition = {
+        source: "shipments",
+        type: "table",
+        grouped: true,
+        metric: "total",
+        ...v.definition,
+        name: v.name,
+      };
       writeFilters();
-      location.hash = "performance";
+      await render();
     }
     if (b.dataset.deleteView) {
       if (state.demo)
@@ -1062,6 +1296,27 @@ document.addEventListener("change", (ev) => {
     state.dimension = ev.target.value;
     render();
   }
+  if (ev.target.dataset.selectAll) {
+    const el = ev.target.closest("[data-filter]");
+    el.querySelectorAll("input[name]").forEach(
+      (x) => (x.checked = ev.target.checked),
+    );
+  }
+  if (ev.target.closest(".multi-options") && ev.target.name) {
+    const el = ev.target.closest("[data-filter]"),
+      checks = [...el.querySelectorAll("input[name]")],
+      all = el.querySelector("[data-select-all]");
+    all.checked = checks.every((x) => x.checked);
+    all.indeterminate = checks.some((x) => x.checked) && !all.checked;
+  }
+  if (ev.target.id === "customSource") {
+    state.customDefinition = readCustom($("#viewForm"));
+    state.customDefinition.columns =
+      state.customDefinition.source === "raw"
+        ? Object.keys(rawLines(state.scopeRows)[0] || {}).slice(0, 10)
+        : undefined;
+    render();
+  }
   if (ev.target.id === "importFile") parseFile(ev.target.files[0]);
 });
 document.addEventListener("submit", async (ev) => {
@@ -1078,10 +1333,7 @@ document.addEventListener("submit", async (ev) => {
     const form = new FormData(ev.target),
       view = {
         name: form.get("name").trim(),
-        definition: {
-          dimension: form.get("dimension"),
-          filter: { ...state.filter },
-        },
+        definition: readCustom(ev.target),
       };
     if (!view.name) return;
     try {
@@ -1090,6 +1342,7 @@ document.addEventListener("submit", async (ev) => {
         const { error } = await state.client.from("next_views").insert(view);
         if (error) throw error;
       }
+      state.customDefinition = view.definition;
       await render();
       toast("View definition saved.");
     } catch (err) {
@@ -1196,4 +1449,13 @@ async function boot() {
 }
 boot().catch((err) => {
   $("#authError").textContent = err.message;
+});
+
+document.addEventListener("input", (ev) => {
+  if (ev.target.classList.contains("option-search")) {
+    const q = ev.target.value.toLowerCase();
+    ev.target.parentElement
+      .querySelectorAll(".filter-option")
+      .forEach((l) => (l.hidden = !l.textContent.toLowerCase().includes(q)));
+  }
 });

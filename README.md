@@ -1,6 +1,6 @@
 # SHARV- Logistics Control tower
 
-A private Shiprocket operations workspace with a navy-and-blue dashboard, server-side analytics, shipment drilldowns, an action queue, saved views, exports, and a floating SHARV assistant.
+A private Shiprocket operations workspace with a navy-and-blue dashboard, consistent report analytics, shipment drilldowns, an action queue, custom tables/charts, exports, and a floating SHARV assistant.
 
 The redesigned application replaces the previous root application. Its entry point is `index.html`; `npm run build` produces the equivalent deployable `dist/` directory. The previous version is recoverable from Git history.
 

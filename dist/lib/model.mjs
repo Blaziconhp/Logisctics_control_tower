@@ -20,6 +20,9 @@ export function normalizeStatus(value) {
   const text = String(value ?? "").trim();
   if (STATUS_CODES[text]) return STATUS_CODES[text];
   if (/^rto[ _-]*delivered$/i.test(text)) return "RTO Delivered";
+  if (/^undelivered/i.test(text)) return "Undelivered";
+  if (/^in transit/i.test(text)) return "In Transit";
+  if (/^cancelled$|^canceled$/i.test(text)) return "Cancelled";
   if (/^delivered$/i.test(text)) return "Delivered";
   if (/^lost$/i.test(text)) return "Lost";
   if (/^damaged$/i.test(text)) return "Damaged";
@@ -46,7 +49,8 @@ export function normalizeRow(headers, cells, sheet, rowNumber) {
     for (const key of keys) {
       const v = source.get(header(key));
       if (v !== undefined && v !== null && String(v).trim() !== "")
-        return String(v).trim();
+        if (!/^(n\/?a|null|none|undefined|-)$/i.test(String(v).trim()))
+          return String(v).trim();
     }
     return null;
   };
@@ -55,8 +59,24 @@ export function normalizeRow(headers, cells, sheet, rowNumber) {
     const n = v === null ? null : Number(v.replace(/,/g, ""));
     return Number.isFinite(n) && n >= 0 ? n : null;
   };
-  const date = (...keys) => parseDate(get(...keys));
-  const awb = get("awb", "awb code", "awb number", "awb no", "tracking number");
+  const date = (...keys) => {
+    for (const key of keys) {
+      const parsed = parseDate(get(key));
+      if (parsed) return parsed;
+    }
+    return null;
+  };
+  const sourceAwb = get(
+    "awb",
+    "awb code",
+    "awb number",
+    "awb no",
+    "tracking number",
+  );
+  const awb =
+    sourceAwb && !/^[+-]?\d+(?:\.\d+)?e[+-]?\d+$/i.test(sourceAwb)
+      ? sourceAwb
+      : null;
   const order_id = get(
     "channel order id",
     "order id",
@@ -78,30 +98,107 @@ export function normalizeRow(headers, cells, sheet, rowNumber) {
       provider_order_id: get("shiprocket order id"),
       provider_shipment_id: get("shiprocket shipment id", "shipment id"),
       courier: get("courier company", "courier name", "courier"),
-      customer: get("customer account", "channel name", "brand", "merchant"),
+      customer: get(
+        "customer account",
+        "channel name",
+        "channel",
+        "brand",
+        "merchant",
+      ),
       recipient: get("customer name", "recipient name", "shipping name"),
-      city: get("shipping city", "customer city", "city"),
-      state: get("shipping state", "customer state", "state"),
-      pincode: get("shipping pincode", "customer pincode", "pincode"),
+      city: get("address city", "shipping city", "customer city", "city"),
+      state: get("address state", "shipping state", "customer state", "state"),
+      pincode: get(
+        "address pincode",
+        "shipping pincode",
+        "customer pincode",
+        "pincode",
+      ),
       payment: get("payment method", "payment type"),
       warehouse: get("pickup address name", "warehouse name", "warehouse"),
       status,
-      order_date: date("order date", "created at", "created date"),
-      pickup_date: date("pickup date", "shipped date"),
-      delivered_date: date("delivered date", "delivery date"),
+      order_date: date(
+        "shiprocket created at",
+        "shiprocket created date",
+        "order date",
+        "created at",
+        "created date",
+      ),
+      pickup_date: date(
+        "pickedup timestamp",
+        "order picked up date",
+        "pickup date",
+      ),
+      delivered_date: date(
+        "order delivered date",
+        "delivered date",
+        "delivery date",
+      ),
       edd: date("edd", "estimated delivery date", "expected delivery date"),
       status_at: date("status updated at", "last updated at", "updated at"),
       freight: number(
+        "freight total amount",
         "total shipping charge",
         "freight charge",
         "shipping charges",
         "freight",
       ),
-      attempts: number("delivery attempts", "attempts"),
+      attempts: number("attempt count", "delivery attempts", "attempts"),
       product: get("product name", "product names"),
-      sku: get("sku", "product sku"),
+      sku: get("channel sku", "master sku", "sku", "product sku"),
       quantity: number("quantity", "product quantity", "qty"),
-      remark: get("rto reason", "ndr reason", "remarks", "remark"),
+      remark: get(
+        "rto reason",
+        "latest ndr reason",
+        "ndr reason",
+        "remarks",
+        "remark",
+      ),
+      details: {
+        mapping_version: 2,
+        source_awb: sourceAwb,
+        awb_issue:
+          sourceAwb && !awb
+            ? "Scientific notation in source; original AWB digits need correction"
+            : null,
+        master_courier: get("master courier"),
+        zone: get("zone"),
+        customer_email: get("customer email"),
+        customer_mobile: get("customer mobile"),
+        address: [get("address line 1"), get("address line 2")]
+          .filter(Boolean)
+          .join(", "),
+        pickup_attempt_date: date("pickup first attempt date"),
+        rto_initiated_date: date("rto initiated date"),
+        rto_reason: get("rto reason"),
+        ndr_reason: get(
+          "latest ndr reason",
+          "ndr 3 remark",
+          "ndr 2 remark",
+          "ndr 1 remark",
+        ),
+        pickup_reason: get("latest npr reason", "pickup exception reason"),
+        source_status: get(
+          "shipment status",
+          "current status",
+          "status",
+          "order status",
+        ),
+        source_risk: get("order risk"),
+        is_reverse: /^(yes|true|1)$/i.test(get("is reverse") || ""),
+        lines: [
+          {
+            product: get("product name", "product names"),
+            sku: get("channel sku", "master sku", "sku", "product sku"),
+            quantity: number("product quantity", "quantity", "qty"),
+            raw: Object.fromEntries(
+              headers.map((h, i) => [String(h), cells[i] ?? ""]),
+            ),
+            sheet,
+            row: rowNumber,
+          },
+        ],
+      },
       source_refs: [{ sheet, row: rowNumber }],
     },
   };
@@ -113,13 +210,13 @@ export function parseDate(value) {
     return Number.isNaN(+value) ? null : value.toISOString();
   const s = String(value).trim();
   if (/^\d{5}(\.\d+)?$/.test(s))
-    return new Date((Number(s) - 25569) * 86400000).toISOString();
+    return new Date((Number(s) - 25569) * 86400000 - 19800000).toISOString();
   let iso = s;
   const indian = s.match(
-    /^(\d{2})[ /-](\d{2})[ /-](\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/,
+    /^(\d{1,2})[ /-](\d{1,2})[ /-](\d{4}|\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/,
   );
   if (indian)
-    iso = `${indian[3]}-${indian[2]}-${indian[1]}T${indian[4] || "00"}:${indian[5] || "00"}:${indian[6] || "00"}+05:30`;
+    iso = `${indian[3].length === 2 ? "20" + indian[3] : indian[3]}-${indian[2].padStart(2, "0")}-${indian[1].padStart(2, "0")}T${(indian[4] || "00").padStart(2, "0")}:${indian[5] || "00"}:${indian[6] || "00"}+05:30`;
   else if (/^\d{4}-\d{2}-\d{2}$/.test(s)) iso = s + "T00:00:00+05:30";
   else if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(s))
     iso = s.replace(" ", "T") + "+05:30";
