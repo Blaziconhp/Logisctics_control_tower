@@ -1,18 +1,13 @@
-import { readFile } from "node:fs/promises";
-
-const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
-const script = await readFile(new URL("../app.js", import.meta.url), "utf8");
-
-const requiredRoutes = ["overview", "performance", "exceptions", "shipments", "studio", "sharv"];
-const requiredLabels = ["SHARV", "Download underlying raw data", "saved_views", "get_my_access"];
-
-for (const route of requiredRoutes) {
-  if (!html.includes(`data-route="${route}"`) && !script.includes(`route === "${route}"`)) throw new Error(`Missing route: ${route}`);
-}
-for (const label of requiredLabels) {
-  if (!html.includes(label) && !script.includes(label)) throw new Error(`Missing required integration: ${label}`);
-}
-if (!html.includes('viewport-fit=cover')) throw new Error("Responsive viewport metadata is missing");
-if (!script.includes('name: "lookup_shipments"') || !script.includes('name: "get_sla_insight"')) throw new Error("WebMCP tools are missing");
-
-console.log("Static verification passed");
+import {readFile,access} from 'node:fs/promises';
+import assert from 'node:assert/strict';
+const root=new URL('../',import.meta.url);
+const html=await readFile(new URL('index.html',root),'utf8');
+const script=await readFile(new URL('app.js',root),'utf8');
+assert(html.includes('<title>SHARV- Logistics Control tower</title>'));
+for(const route of ['overview','shipments','exceptions','performance','studio','sharv'])assert(html.includes(`data-route="${route}"`));
+for(const id of ['floatingSharv','assistantPanel','closeAssistant','login','recovery','logout'])assert(html.includes(`id="${id}"`));
+assert(script.includes('window.SHARV_CONFIG'));
+assert(script.includes('next_is_primary'));
+assert(!/\bITL\b|\bBlitz\b/.test(html+script));
+for(const file of ['config.js','lib/model.mjs','lib/demo.mjs','workers/import.js','vendor/supabase.js','vendor/xlsx.full.min.js'])await access(new URL(file,root));
+console.log('Application entry, branding, floating assistant, assets and Shiprocket-only checks passed');

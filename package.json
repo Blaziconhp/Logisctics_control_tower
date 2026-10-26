@@ -1,15 +1,15 @@
 {
   "name": "sharv-logistics-control-tower",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "Professional logistics analytics, custom views, secure uploads, and the SHARV operations assistant.",
+  "description": "SHARV- Logistics Control tower: private Shiprocket analytics, secure imports, and floating operations assistant.",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node --check app.js && node scripts/verify-static.mjs"
+    "check": "node --check app.js && node --check workers/import.js && node scripts/verify-static.mjs && node --experimental-vm-modules --test tests/*.test.mjs",
+    "check:db": "node tests/database.mjs"
   },
-  "dependencies": {
-    "@supabase/supabase-js": "2.49.8",
-    "chart.js": "4.4.8",
-    "xlsx": "0.18.5"
-  }
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.11"
+  },
+  "type": "module"
 }

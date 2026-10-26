@@ -1,5 +1,4 @@
-// Browser-safe configuration only. Never place a Supabase secret or service-role key here.
 window.SHARV_CONFIG = {
-  supabaseUrl: "https://ejdymliezwqywztyuerj.supabase.co",
-  supabaseAnonKey: "sb_publishable_GTGtVfaoNJvdGYHStOPHhQ_jLwvgQ9q"
+  supabaseUrl: "https://rswhbhtcdjescofzjimk.supabase.co",
+  supabasePublishableKey: "sb_publishable_fATO1-E8Abh8hJiNlaMQhw_zkwYesJ9"
 };

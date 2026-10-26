@@ -1,294 +1,167 @@
--- SHARV Logistics Control Tower — Supabase schema
--- Run once in a new Supabase project's SQL editor, then assign the two admin slots
--- using the commented statements at the end of this file.
-
-create extension if not exists pgcrypto;
-create extension if not exists pg_trgm;
+-- NEW Supabase project only. Independent of the legacy tables. Run as postgres.
+begin;
 create schema if not exists private;
+create table private.primary_users(slot smallint primary key check(slot in(1,2)), user_id uuid unique references auth.users(id) on delete set null);
+insert into private.primary_users(slot) values(1),(2);
+revoke all on private.primary_users from public,anon,authenticated;
+create function public.next_is_primary() returns boolean language sql stable security definer set search_path='' as $$ select exists(select 1 from private.primary_users where user_id=auth.uid()) $$;
+revoke all on function public.next_is_primary() from public,anon;
+grant execute on function public.next_is_primary() to authenticated;
 
-revoke all on schema private from public, anon, authenticated;
--- Authenticated requests need schema USAGE to execute the RLS helper below,
--- but receive no table privileges inside the private schema.
+create table public.next_imports(
+ id uuid primary key default gen_random_uuid(), owner_id uuid not null default auth.uid() references auth.users(id),
+ filename text not null, object_path text not null unique, sha256 text not null check(length(sha256)=64),
+ original_bytes bigint not null, compressed_bytes bigint not null, source_rows integer not null, rejected_rows integer not null default 0,
+ expected_shipments integer not null, status text not null default 'staging' check(status in('staging','completed','failed')),
+ created_at timestamptz not null default now(), completed_at timestamptz, report jsonb not null default '{}'::jsonb,
+ unique(sha256)
+);
+create table public.next_shipments(
+ id bigint generated always as identity primary key,
+ shipment_key text not null unique, awb text, order_id text, provider_order_id text, provider_shipment_id text,
+ courier text, customer text, recipient text, city text, state text, pincode text, payment text, warehouse text,
+ status text not null default 'Unknown', order_date timestamptz, pickup_date timestamptz, delivered_date timestamptz, edd timestamptz,
+ status_at timestamptz, freight numeric check(freight>=0), attempts integer check(attempts>=0), product text, sku text, quantity numeric,
+ remark text, source_refs jsonb not null default '[]', import_id uuid references public.next_imports(id), updated_at timestamptz not null default now(),
+ check(awb is not null or order_id is not null)
+);
+create index on public.next_shipments(order_date desc,id);
+create index on public.next_shipments(courier,state,status);
+create index on public.next_shipments(order_id);
+create index on public.next_shipments(awb);
+create table private.next_staging(import_id uuid references public.next_imports(id) on delete cascade, shipment_key text, payload jsonb not null, primary key(import_id,shipment_key));
+create table public.next_views(id uuid primary key default gen_random_uuid(),owner_id uuid not null default auth.uid() references auth.users(id) on delete cascade,name text not null check(length(name) between 1 and 80),definition jsonb not null,created_at timestamptz default now());
+create table public.next_events(id bigint generated always as identity primary key,event_key text not null unique,awb text not null,event_at timestamptz not null,status text not null,payload jsonb not null,outcome text not null,created_at timestamptz default now());
+create index on public.next_events(awb,event_at desc);
+
+alter table public.next_imports enable row level security;
+alter table public.next_shipments enable row level security;
+alter table public.next_views enable row level security;
+alter table public.next_events enable row level security;
+create policy read_imports on public.next_imports for select to authenticated using(true);
+create policy insert_imports on public.next_imports for insert to authenticated with check(public.next_is_primary() and owner_id=auth.uid() and status='staging' and object_path=auth.uid()::text||'/'||sha256||'.gz');
+create policy update_imports on public.next_imports for update to authenticated using(public.next_is_primary() and owner_id=auth.uid()) with check(public.next_is_primary() and owner_id=auth.uid());
+create policy read_shipments on public.next_shipments for select to authenticated using(true);
+create policy read_events on public.next_events for select to authenticated using(true);
+create policy own_views on public.next_views for all to authenticated using(owner_id=auth.uid()) with check(owner_id=auth.uid());
+revoke all on public.next_imports,public.next_shipments,public.next_views,public.next_events from public,anon,authenticated;
+grant select,insert on public.next_imports to authenticated;
+-- Finalization/state updates occur only through protected transactional functions.
+grant select on public.next_shipments,public.next_events to authenticated;
+grant select,insert,update,delete on public.next_views to authenticated;
+
+insert into storage.buckets(id,name,public,file_size_limit,allowed_mime_types) values('shiprocket-sources','shiprocket-sources',false,104857600,array['application/gzip']) on conflict(id) do update set public=false;
+create policy next_sources_read on storage.objects for select to authenticated using(bucket_id='shiprocket-sources');
+create policy next_sources_insert on storage.objects for insert to authenticated with check(bucket_id='shiprocket-sources' and public.next_is_primary() and (storage.foldername(name))[1]=auth.uid()::text);
+-- No browser delete: source archives are an immutable audit trail, including rows that failed mapping.
+
+create function public.next_stage(p_import uuid,p_rows jsonb) returns void language plpgsql security definer set search_path='' as $$
+begin
+ if not public.next_is_primary() then raise exception 'Primary access required'; end if;
+ perform 1 from public.next_imports where id=p_import and owner_id=auth.uid() and status='staging' for update;
+ if not found then raise exception 'Import is not owned or is already finalized'; end if;
+ if jsonb_typeof(p_rows)<>'array' or jsonb_array_length(p_rows)>300 then raise exception 'Expected at most 300 rows'; end if;
+ insert into private.next_staging select p_import,x->>'shipment_key',x from jsonb_array_elements(p_rows) x
+ on conflict(import_id,shipment_key) do update set payload=excluded.payload;
+end $$;
+
+create function public.next_finalize(p_import uuid) returns jsonb language plpgsql security definer set search_path='' as $$
+declare b public.next_imports; n integer; changed integer;
+begin
+ if not public.next_is_primary() then raise exception 'Primary access required'; end if;
+ -- Serialize imports and tracking events to avoid stale report/event races.
+ perform pg_advisory_xact_lock(918320);
+ select * into b from public.next_imports where id=p_import and owner_id=auth.uid() for update;
+ if b.id is null then raise exception 'Import not found'; end if;
+ if b.status='completed' then return jsonb_build_object('already_completed',true); end if;
+ select count(*) into n from private.next_staging where import_id=p_import;
+ if n<>b.expected_shipments or n=0 then raise exception 'Staged count does not match expected shipment count'; end if;
+ if not exists(select 1 from storage.objects where bucket_id='shiprocket-sources' and name=b.object_path) then raise exception 'Original archive is missing'; end if;
+ -- Promote an order-only row only when this report maps that merchant order to exactly one AWB.
+ update public.next_shipments s set shipment_key=x.shipment_key,awb=x.awb
+ from (select payload->>'order_id' order_id,min(payload->>'shipment_key') shipment_key,min(payload->>'awb') awb
+       from private.next_staging where import_id=p_import and payload->>'awb' is not null
+       group by payload->>'order_id' having count(distinct payload->>'awb')=1) x
+ where s.awb is null and s.order_id=x.order_id and s.status not in('Delivered','RTO Delivered','Lost','Damaged')
+ and not exists(select 1 from public.next_shipments other where other.shipment_key=x.shipment_key);
+ insert into public.next_shipments as current(shipment_key,awb,order_id,provider_order_id,provider_shipment_id,courier,customer,recipient,city,state,pincode,payment,warehouse,status,order_date,pickup_date,delivered_date,edd,status_at,freight,attempts,product,sku,quantity,remark,source_refs,import_id)
+ select r.shipment_key,r.awb,r.order_id,r.provider_order_id,r.provider_shipment_id,r.courier,r.customer,r.recipient,r.city,r.state,r.pincode,r.payment,r.warehouse,coalesce(r.status,'Unknown'),r.order_date,r.pickup_date,r.delivered_date,r.edd,r.status_at,r.freight,r.attempts,r.product,r.sku,r.quantity,r.remark,coalesce(r.source_refs,'[]'),p_import
+ from private.next_staging s cross join lateral jsonb_populate_record(null::public.next_shipments,s.payload) r where s.import_id=p_import
+ on conflict(shipment_key) do update set
+ order_id=coalesce(excluded.order_id,current.order_id),provider_order_id=coalesce(excluded.provider_order_id,current.provider_order_id),provider_shipment_id=coalesce(excluded.provider_shipment_id,current.provider_shipment_id),
+ courier=coalesce(excluded.courier,current.courier),customer=coalesce(excluded.customer,current.customer),recipient=coalesce(excluded.recipient,current.recipient),city=coalesce(excluded.city,current.city),state=coalesce(excluded.state,current.state),pincode=coalesce(excluded.pincode,current.pincode),payment=coalesce(excluded.payment,current.payment),warehouse=coalesce(excluded.warehouse,current.warehouse),
+ status=case when current.status in('Delivered','RTO Delivered','Lost','Damaged') or (current.status_at is not null and (excluded.status_at is null or excluded.status_at<=current.status_at)) then current.status else excluded.status end,
+ status_at=case when current.status in('Delivered','RTO Delivered','Lost','Damaged') then current.status_at else greatest(current.status_at,excluded.status_at) end,
+ order_date=coalesce(excluded.order_date,current.order_date),pickup_date=coalesce(excluded.pickup_date,current.pickup_date),delivered_date=coalesce(current.delivered_date,excluded.delivered_date),edd=coalesce(excluded.edd,current.edd),
+ freight=coalesce(excluded.freight,current.freight),attempts=greatest(excluded.attempts,current.attempts),product=coalesce(excluded.product,current.product),sku=coalesce(excluded.sku,current.sku),quantity=coalesce(excluded.quantity,current.quantity),remark=coalesce(excluded.remark,current.remark),source_refs=excluded.source_refs,import_id=p_import,updated_at=now()
+ where current.status not in('Delivered','RTO Delivered','Lost','Damaged');
+ get diagnostics changed=row_count;
+ update public.next_imports set status='completed',completed_at=now() where id=p_import;
+ delete from private.next_staging where import_id=p_import;
+ return jsonb_build_object('processed',changed,'source_rows',b.source_rows,'rejected_rows',b.rejected_rows);
+end $$;
+
+-- One predicate for every KPI, drilldown, table, export and assistant response.
+create function private.next_matches(s public.next_shipments,f jsonb) returns boolean language sql stable set search_path='' as $$
+ select
+ (coalesce(f->>'from','')='' or s.order_date >= ((f->>'from')::date::timestamp at time zone 'Asia/Kolkata')) and
+ (coalesce(f->>'to','')='' or s.order_date < (((f->>'to')::date+1)::timestamp at time zone 'Asia/Kolkata')) and
+ (coalesce(f->>'courier','')='' or s.courier=f->>'courier') and
+ (coalesce(f->>'state','')='' or s.state=f->>'state') and
+ (coalesce(f->>'customer','')='' or s.customer=f->>'customer') and
+ (coalesce(f->>'status','')='' or s.status=f->>'status') and
+ (not coalesce((f->>'exceptions')::boolean,false) or s.status in('Lost','Damaged','Undelivered') or (s.status not in('Delivered','RTO Delivered','Lost','Damaged') and (s.edd<now() or s.attempts>=2))) and
+ (not coalesce((f->>'overdue')::boolean,false) or (s.status not in('Delivered','RTO Delivered','Lost','Damaged') and s.edd<now())) and
+ (coalesce(f->>'q','')='' or strpos(lower(concat_ws(' ',s.awb,s.order_id,s.recipient,s.customer,s.courier,s.city,s.state,s.status)),lower(f->>'q'))>0) and
+ (not(f ? 'ids') or s.awb in(select jsonb_array_elements_text(f->'ids')) or s.order_id in(select jsonb_array_elements_text(f->'ids')))
+$$;
+create function public.next_page(p_filter jsonb default '{}',p_after bigint default 0,p_limit integer default 50) returns jsonb language sql stable security invoker set search_path='' as $$
+ select coalesce(jsonb_agg(to_jsonb(s) order by s.id),'[]') from (select * from public.next_shipments s where s.id>p_after and private.next_matches(s,p_filter) order by s.id limit least(greatest(p_limit,1),1000)) s
+$$;
+create function public.next_summary(p_filter jsonb default '{}',p_dimension text default 'courier') returns jsonb language plpgsql stable security invoker set search_path='' as $$
+declare result jsonb;
+begin
+ if p_dimension not in('courier','state','city','customer','status','month','product','warehouse','payment') then raise exception 'Unsupported dimension'; end if;
+ with scoped as materialized (select s.*,case when p_dimension='month' then coalesce(to_char(order_date at time zone 'Asia/Kolkata','YYYY-MM'),'Unknown') else coalesce(case p_dimension when 'courier' then s.courier when 'state' then s.state when 'city' then s.city when 'customer' then s.customer when 'status' then s.status when 'product' then s.product when 'warehouse' then s.warehouse when 'payment' then s.payment end,'Unknown') end as dimension from public.next_shipments s where private.next_matches(s,p_filter)),
+ kpi as (select count(*) total,count(*) filter(where status='Delivered') delivered,count(*) filter(where status='RTO Delivered') rto,count(*) filter(where status not in('Delivered','RTO Delivered','Lost','Damaged')) open,
+ count(*) filter(where status in('Lost','Damaged','Undelivered') or (status not in('Delivered','RTO Delivered','Lost','Damaged') and (edd<now() or attempts>=2))) exceptions,
+ count(*) filter(where status='Delivered' and edd is not null and delivered_date is not null) sla_known,
+ count(*) filter(where status='Delivered' and edd is not null and delivered_date is not null and delivered_date<=edd) on_time,
+ sum(freight) freight,count(freight) freight_known,count(order_date) dates_known,
+ avg(extract(epoch from(delivered_date-pickup_date))/86400) filter(where status='Delivered' and delivered_date>=pickup_date) avg_transit,
+ max(updated_at) updated from scoped),
+ groups as (select dimension,count(*) total,count(*) filter(where status='Delivered') delivered,count(*) filter(where status='RTO Delivered') rto,count(*) filter(where status not in('Delivered','RTO Delivered','Lost','Damaged')) open,sum(freight) freight from scoped group by dimension),
+ outcomes as (select status,count(*) total from scoped group by status),
+ months as (select to_char(order_date at time zone 'Asia/Kolkata','YYYY-MM') as "month",count(*) total from scoped where order_date is not null group by 1 order by 1 desc limit 10)
+ select jsonb_build_object('kpi',(select to_jsonb(kpi) from kpi),'groups',(select coalesce(jsonb_agg(g),'[]') from(select * from groups order by total desc,dimension limit 100) g),
+ 'outcomes',(select coalesce(jsonb_agg(outcomes),'[]') from outcomes),'months',(select coalesce(jsonb_agg(months order by "month"),'[]') from months)) into result;
+ return result;
+end $$;
+-- Queries use RLS as the caller; grant only the predicate needed by those queries.
 grant usage on schema private to authenticated;
+grant execute on function private.next_matches(public.next_shipments,jsonb) to authenticated;
+revoke all on private.next_staging from public,anon,authenticated;
+revoke all on function public.next_stage(uuid,jsonb),public.next_finalize(uuid),public.next_page(jsonb,bigint,integer),public.next_summary(jsonb,text) from public,anon;
+grant execute on function public.next_stage(uuid,jsonb),public.next_finalize(uuid),public.next_page(jsonb,bigint,integer),public.next_summary(jsonb,text) to authenticated;
 
-create table if not exists private.upload_admin_slots (
-  slot smallint primary key check (slot in (1, 2)),
-  user_id uuid unique references auth.users(id) on delete restrict,
-  assigned_at timestamptz,
-  assigned_by uuid references auth.users(id) on delete set null
-);
-
-insert into private.upload_admin_slots(slot) values (1), (2)
-on conflict (slot) do nothing;
-
-create or replace function private.is_upload_admin()
-returns boolean
-language sql
-stable
-security definer
-set search_path = ''
-as $$
-  select exists (
-    select 1
-    from private.upload_admin_slots s
-    where s.user_id = auth.uid()
-  );
-$$;
-
-revoke all on function private.is_upload_admin() from public, anon;
-grant execute on function private.is_upload_admin() to authenticated;
-
-create or replace function public.get_my_access()
-returns table(is_upload_admin boolean, access_role text)
-language sql
-stable
-security definer
-set search_path = ''
-as $$
-  select
-    private.is_upload_admin(),
-    case when private.is_upload_admin() then 'upload_admin' else 'viewer' end;
-$$;
-
-revoke all on function public.get_my_access() from public, anon;
-grant execute on function public.get_my_access() to authenticated;
-
-create table if not exists public.profiles (
-  user_id uuid primary key references auth.users(id) on delete cascade,
-  display_name text not null default '',
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-
-create table if not exists public.upload_batches (
-  id uuid primary key default gen_random_uuid(),
-  source_system text not null check (char_length(source_system) between 1 and 80),
-  original_filename text not null check (char_length(original_filename) between 1 and 255),
-  object_path text,
-  file_size_bytes bigint not null default 0 check (file_size_bytes >= 0),
-  status text not null default 'processing' check (status in ('processing', 'completed', 'failed')),
-  accepted_rows integer not null default 0 check (accepted_rows >= 0),
-  rejected_rows integer not null default 0 check (rejected_rows >= 0),
-  duplicate_rows integer not null default 0 check (duplicate_rows >= 0),
-  error_summary jsonb not null default '[]'::jsonb,
-  uploaded_by uuid not null default auth.uid() references auth.users(id) on delete restrict,
-  created_at timestamptz not null default now(),
-  completed_at timestamptz
-);
-
-create table if not exists public.shipments (
-  id uuid primary key default gen_random_uuid(),
-  source_system text not null,
-  awb text not null,
-  order_id text not null default '',
-  customer_account text not null default 'Unassigned customer',
-  recipient_name text not null default 'Not provided',
-  courier text not null,
-  city text not null default 'Unknown',
-  state text not null default 'Unknown',
-  pincode text not null default '',
-  warehouse text not null default 'Unknown',
-  payment_type text not null default 'Unknown',
-  transport_mode text not null default 'Surface',
-  direction text not null default 'Forward',
-  status text not null,
-  status_group text not null,
-  order_date timestamptz,
-  pickup_date timestamptz,
-  delivered_date timestamptz,
-  edd timestamptz,
-  tat_days numeric(10,2) check (tat_days is null or tat_days >= 0),
-  sla_target_days numeric(10,2) check (sla_target_days is null or sla_target_days > 0),
-  ageing_days numeric(10,2) check (ageing_days is null or ageing_days >= 0),
-  attempts integer not null default 0 check (attempts >= 0),
-  freight_inr numeric(14,2) check (freight_inr is null or freight_inr >= 0),
-  ndr_status text not null default '',
-  remark text not null default '',
-  on_time boolean,
-  upload_batch_id uuid references public.upload_batches(id) on delete set null,
-  raw_payload jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  unique (source_system, awb)
-);
-
-create table if not exists public.sla_rules (
-  id uuid primary key default gen_random_uuid(),
-  courier text,
-  customer_account text,
-  state text,
-  city text,
-  service_level text not null default 'standard',
-  target_days numeric(10,2) not null check (target_days > 0),
-  effective_from date not null default current_date,
-  effective_to date,
-  active boolean not null default true,
-  created_by uuid not null default auth.uid() references auth.users(id) on delete restrict,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  check (effective_to is null or effective_to >= effective_from),
-  check (courier is not null or customer_account is not null or state is not null or city is not null)
-);
-
-create table if not exists public.saved_views (
-  id uuid primary key default gen_random_uuid(),
-  owner_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
-  name text not null check (char_length(name) between 1 and 80),
-  definition jsonb not null,
-  is_default boolean not null default false,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  check (jsonb_typeof(definition) = 'object')
-);
-
-create table if not exists public.audit_events (
-  id bigint generated always as identity primary key,
-  actor_id uuid references auth.users(id) on delete set null,
-  action text not null,
-  entity_type text not null,
-  entity_id text,
-  details jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default now()
-);
-
-create index if not exists shipments_order_date_idx on public.shipments(order_date desc, id);
-create index if not exists shipments_courier_state_city_idx on public.shipments(courier, state, city, order_date desc);
-create index if not exists shipments_status_idx on public.shipments(status_group, order_date desc);
-create index if not exists shipments_order_id_lower_idx on public.shipments(lower(order_id));
-create index if not exists shipments_awb_lower_idx on public.shipments(lower(awb));
-create index if not exists shipments_customer_trgm_idx on public.shipments using gin (customer_account gin_trgm_ops);
-create index if not exists shipments_recipient_trgm_idx on public.shipments using gin (recipient_name gin_trgm_ops);
-create index if not exists saved_views_owner_idx on public.saved_views(owner_id, updated_at desc);
-create unique index if not exists one_default_view_per_user_idx on public.saved_views(owner_id) where is_default;
-
-create or replace function public.touch_updated_at()
-returns trigger
-language plpgsql
-security invoker
-set search_path = ''
-as $$
+-- Called only by the Edge Function's service role, never by browser users.
+create function public.next_apply_event(p_key text,p_awb text,p_status text,p_at timestamptz,p_payload jsonb,p_courier text default null) returns text language plpgsql security definer set search_path='' as $$
+declare existing public.next_shipments; outcome text;
 begin
-  new.updated_at = now();
-  return new;
-end;
-$$;
-
-drop trigger if exists profiles_touch_updated_at on public.profiles;
-create trigger profiles_touch_updated_at before update on public.profiles for each row execute function public.touch_updated_at();
-drop trigger if exists shipments_touch_updated_at on public.shipments;
-create trigger shipments_touch_updated_at before update on public.shipments for each row execute function public.touch_updated_at();
-drop trigger if exists sla_rules_touch_updated_at on public.sla_rules;
-create trigger sla_rules_touch_updated_at before update on public.sla_rules for each row execute function public.touch_updated_at();
-drop trigger if exists saved_views_touch_updated_at on public.saved_views;
-create trigger saved_views_touch_updated_at before update on public.saved_views for each row execute function public.touch_updated_at();
-
-create or replace function public.handle_new_user()
-returns trigger
-language plpgsql
-security definer
-set search_path = ''
-as $$
-begin
-  insert into public.profiles(user_id, display_name)
-  values (new.id, coalesce(new.raw_user_meta_data ->> 'full_name', split_part(new.email, '@', 1)))
-  on conflict (user_id) do nothing;
-  return new;
-end;
-$$;
-
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created after insert on auth.users for each row execute function public.handle_new_user();
-
-alter table public.profiles enable row level security;
-alter table public.upload_batches enable row level security;
-alter table public.shipments enable row level security;
-alter table public.sla_rules enable row level security;
-alter table public.saved_views enable row level security;
-alter table public.audit_events enable row level security;
-
-drop policy if exists profiles_read_own on public.profiles;
-create policy profiles_read_own on public.profiles for select to authenticated using (user_id = auth.uid());
-drop policy if exists profiles_update_own on public.profiles;
-create policy profiles_update_own on public.profiles for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
-
-drop policy if exists batches_read_authenticated on public.upload_batches;
-create policy batches_read_authenticated on public.upload_batches for select to authenticated using (true);
-drop policy if exists batches_insert_admin on public.upload_batches;
-create policy batches_insert_admin on public.upload_batches for insert to authenticated with check ((select private.is_upload_admin()) and uploaded_by = auth.uid());
-drop policy if exists batches_update_admin on public.upload_batches;
-create policy batches_update_admin on public.upload_batches for update to authenticated using ((select private.is_upload_admin()) and uploaded_by = auth.uid()) with check ((select private.is_upload_admin()) and uploaded_by = auth.uid());
-
-drop policy if exists shipments_read_authenticated on public.shipments;
-create policy shipments_read_authenticated on public.shipments for select to authenticated using (true);
-drop policy if exists shipments_insert_admin on public.shipments;
-create policy shipments_insert_admin on public.shipments for insert to authenticated with check ((select private.is_upload_admin()));
-drop policy if exists shipments_update_admin on public.shipments;
-create policy shipments_update_admin on public.shipments for update to authenticated using ((select private.is_upload_admin())) with check ((select private.is_upload_admin()));
-drop policy if exists shipments_delete_admin on public.shipments;
-create policy shipments_delete_admin on public.shipments for delete to authenticated using ((select private.is_upload_admin()));
-
-drop policy if exists sla_rules_read_authenticated on public.sla_rules;
-create policy sla_rules_read_authenticated on public.sla_rules for select to authenticated using (true);
-drop policy if exists sla_rules_write_admin on public.sla_rules;
-create policy sla_rules_write_admin on public.sla_rules for all to authenticated using ((select private.is_upload_admin())) with check ((select private.is_upload_admin()));
-
-drop policy if exists saved_views_read_own on public.saved_views;
-create policy saved_views_read_own on public.saved_views for select to authenticated using (owner_id = auth.uid());
-drop policy if exists saved_views_insert_own on public.saved_views;
-create policy saved_views_insert_own on public.saved_views for insert to authenticated with check (owner_id = auth.uid());
-drop policy if exists saved_views_update_own on public.saved_views;
-create policy saved_views_update_own on public.saved_views for update to authenticated using (owner_id = auth.uid()) with check (owner_id = auth.uid());
-drop policy if exists saved_views_delete_own on public.saved_views;
-create policy saved_views_delete_own on public.saved_views for delete to authenticated using (owner_id = auth.uid());
-
-drop policy if exists audit_read_authenticated on public.audit_events;
-create policy audit_read_authenticated on public.audit_events for select to authenticated using (true);
-drop policy if exists audit_insert_admin on public.audit_events;
-create policy audit_insert_admin on public.audit_events for insert to authenticated with check ((select private.is_upload_admin()) and actor_id = auth.uid());
-
-revoke all on public.profiles, public.upload_batches, public.shipments, public.sla_rules, public.saved_views, public.audit_events from anon;
-revoke all on public.profiles, public.upload_batches, public.shipments, public.sla_rules, public.saved_views, public.audit_events from authenticated;
-grant select on public.profiles to authenticated;
-grant update(display_name) on public.profiles to authenticated;
-grant select, insert, update on public.upload_batches to authenticated;
-grant select, insert, update, delete on public.shipments to authenticated;
-grant select, insert, update, delete on public.sla_rules to authenticated;
-grant select, insert, update, delete on public.saved_views to authenticated;
-grant select, insert on public.audit_events to authenticated;
-grant usage, select on sequence public.audit_events_id_seq to authenticated;
-
-insert into storage.buckets(id, name, public, file_size_limit, allowed_mime_types)
-values (
-  'raw-uploads',
-  'raw-uploads',
-  false,
-  26214400,
-  array[
-    'text/csv',
-    'application/vnd.ms-excel',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'application/octet-stream'
-  ]
-)
-on conflict (id) do update set public = false, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
-
-drop policy if exists raw_uploads_read_authenticated on storage.objects;
-create policy raw_uploads_read_authenticated on storage.objects for select to authenticated using (bucket_id = 'raw-uploads');
-drop policy if exists raw_uploads_insert_admin on storage.objects;
-create policy raw_uploads_insert_admin on storage.objects for insert to authenticated with check (
-  bucket_id = 'raw-uploads'
-  and (select private.is_upload_admin())
-  and (storage.foldername(name))[1] = auth.uid()::text
-);
-
--- Assign exactly two upload admins after inviting them through Authentication > Users.
--- Replace the example emails, then run these two statements in the SQL editor:
--- update private.upload_admin_slots
--- set user_id = (select id from auth.users where lower(email) = lower('primary1@company.com')),
---     assigned_at = now()
--- where slot = 1;
---
--- update private.upload_admin_slots
--- set user_id = (select id from auth.users where lower(email) = lower('primary2@company.com')),
---     assigned_at = now()
--- where slot = 2;
+ perform pg_advisory_xact_lock(918320);
+ if exists(select 1 from public.next_events where event_key=p_key) then return 'duplicate'; end if;
+ select * into existing from public.next_shipments where awb=p_awb for update;
+ outcome=case when existing.id is null then 'inserted' when existing.status in('Delivered','RTO Delivered','Lost','Damaged') then 'terminal_ignored' when existing.status_at>=p_at then 'older_ignored' else 'updated' end;
+ insert into public.next_events(event_key,awb,event_at,status,payload,outcome) values(p_key,p_awb,p_at,p_status,p_payload,outcome);
+ if outcome='inserted' then
+ insert into public.next_shipments(shipment_key,awb,status,status_at,courier) values('awb:'||p_awb,p_awb,p_status,p_at,p_courier);
+ elsif outcome='updated' then
+ update public.next_shipments set status=p_status,status_at=p_at,courier=coalesce(p_courier,courier),delivered_date=case when p_status='Delivered' then coalesce(delivered_date,p_at) else delivered_date end,updated_at=now() where id=existing.id;
+ end if;
+ return outcome;
+end $$;
+revoke all on function public.next_apply_event(text,text,text,timestamptz,jsonb,text) from public,anon,authenticated;
+grant execute on function public.next_apply_event(text,text,text,timestamptz,jsonb,text) to service_role;
+grant all on public.next_imports,public.next_shipments,public.next_events to service_role;
+grant usage,select on all sequences in schema public to service_role;
+commit;
