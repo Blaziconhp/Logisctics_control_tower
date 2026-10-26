@@ -63,7 +63,9 @@ svg { display: block; width: 18px; height: 18px; fill: none; stroke: currentColo
 .auth-card h2 { margin: 0; font-size: 2rem; letter-spacing: -.035em; }
 .auth-card .subtle { margin: 7px 0 28px; }
 .auth-note { margin: 22px 0 0; color: var(--ink-500); font-size: .8rem; text-align: center; }
+.auth-forgot { display: block; margin: 12px auto 0; }
 .form-error { min-height: 21px; margin: 2px 0; color: var(--red); font-size: .85rem; }
+.form-error.success { color: var(--teal); }
 
 /* App shell */
 .app-shell { min-height: 100vh; }

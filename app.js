@@ -52,6 +52,7 @@
     user: null,
     role: "viewer",
     demo: false,
+    passwordRecovery: false,
     route: "overview",
     performanceTab: "courier",
     shipments: [],
@@ -2149,6 +2150,12 @@
     registerWebMcpTools();
   }
 
+  function showAuthMode(mode) {
+    const recovery = mode === "recovery";
+    $("#authForm").hidden = recovery;
+    $("#passwordRecoveryForm").hidden = !recovery;
+  }
+
   async function boot() {
     setupEvents();
     state.dataUpdatedAt = new Date();
@@ -2176,9 +2183,27 @@
       return;
     }
     state.supabase = window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.supabaseAnonKey, { global: { fetch: boundedFetch } });
+    state.supabase.auth.onAuthStateChange((event) => {
+      if (event === "PASSWORD_RECOVERY") {
+        state.passwordRecovery = true;
+        $("#authScreen").hidden = false;
+        showAuthMode("recovery");
+      }
+    });
+    const recoveryRequested = new URLSearchParams(location.search).get("recovery") === "1" || new URLSearchParams(location.hash.replace(/^#/, "")).get("type") === "recovery";
     const { data } = await state.supabase.auth.getSession();
     if (!data.session) {
       $("#authScreen").hidden = false;
+      if (recoveryRequested || state.passwordRecovery) {
+        showAuthMode("recovery");
+        $("#passwordRecoveryError").textContent = "This recovery link could not be verified or has expired. Return to sign in and request a new one.";
+      }
+      return;
+    }
+    if (recoveryRequested || state.passwordRecovery) {
+      state.user = data.session.user;
+      $("#authScreen").hidden = false;
+      showAuthMode("recovery");
       return;
     }
     state.user = data.session.user;
@@ -2195,19 +2220,83 @@
   $("#authForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!state.supabase) return;
-    $("#authError").textContent = "";
-    const submit = event.submitter;
+    const errorBox = $("#authError");
+    errorBox.textContent = "";
+    errorBox.classList.remove("success");
+    const submit = event.submitter || $("button[type='submit']", event.currentTarget);
     submit.disabled = true;
-    const { data, error } = await state.supabase.auth.signInWithPassword({ email: $("#authEmail").value.trim(), password: $("#authPassword").value });
-    submit.disabled = false;
-    if (error) { $("#authError").textContent = error.message; return; }
-    state.user = data.user;
     try {
+      const { data, error } = await state.supabase.auth.signInWithPassword({ email: $("#authEmail").value.trim(), password: $("#authPassword").value });
+      if (error) throw error;
+      state.user = data.user;
       await loadCloudState();
       showApp();
     } catch (loadError) {
       console.error(loadError);
-      $("#authError").textContent = "Sign-in succeeded, but the workspace data could not be loaded. Ask an administrator to verify the Supabase schema.";
+      errorBox.textContent = loadError.message || "Sign-in failed. Check your email and password, then try again.";
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  $("#forgotPasswordButton").addEventListener("click", async () => {
+    const email = $("#authEmail");
+    const errorBox = $("#authError");
+    errorBox.textContent = "";
+    errorBox.classList.remove("success");
+    if (!email.value.trim() || !email.checkValidity()) {
+      email.reportValidity();
+      return;
+    }
+    if (!state.supabase) { errorBox.textContent = "Password recovery is unavailable because the secure sign-in service did not load."; return; }
+    const button = $("#forgotPasswordButton");
+    button.disabled = true;
+    button.textContent = "Sending recovery email…";
+    try {
+      const redirectTo = `${location.origin}${location.pathname}?recovery=1`;
+      const { error } = await state.supabase.auth.resetPasswordForEmail(email.value.trim(), { redirectTo });
+      if (error) throw error;
+      errorBox.classList.add("success");
+      errorBox.textContent = "If this email belongs to an approved SHARV account, a password recovery link will arrive shortly. Check your inbox and spam folder.";
+    } catch (error) {
+      console.error(error);
+      errorBox.textContent = error.message || "Could not send the recovery email. Please try again later.";
+    } finally {
+      button.disabled = false;
+      button.textContent = "Forgot password?";
+    }
+  });
+
+  $("#backToSignInButton").addEventListener("click", () => {
+    state.passwordRecovery = false;
+    $("#passwordRecoveryError").textContent = "";
+    $("#authError").textContent = "";
+    showAuthMode("signin");
+    history.replaceState(null, "", location.pathname);
+  });
+
+  $("#passwordRecoveryForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const errorBox = $("#passwordRecoveryError");
+    const password = $("#newPassword").value;
+    const confirmation = $("#confirmNewPassword").value;
+    if (password !== confirmation) { errorBox.textContent = "The passwords do not match."; return; }
+    if (password.length < 8) { errorBox.textContent = "Use a password with at least 8 characters."; return; }
+    const submit = event.submitter || $("button[type='submit']", event.currentTarget);
+    submit.disabled = true;
+    errorBox.textContent = "";
+    try {
+      const { error } = await state.supabase.auth.updateUser({ password });
+      if (error) throw error;
+      await loadCloudState();
+      state.passwordRecovery = false;
+      history.replaceState(null, "", location.pathname);
+      showApp();
+    } catch (error) {
+      console.error(error);
+      errorBox.textContent = error.message || "Could not update the password. Request a new recovery link and try again.";
+    } finally {
+      submit.disabled = false;
     }
   });
 

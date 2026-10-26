@@ -44,7 +44,8 @@ Useful SHARV demo queries:
 4. Run [`supabase/clear_active_dataset.sql`](supabase/clear_active_dataset.sql) to enable the primary-user-only Clear data button. It clears shipment rows and upload history, and returns stored source-file paths for removal through the private storage API.
 5. In Authentication settings, disable public sign-up. Invite the approved users manually.
 6. At the bottom of `supabase/schema.sql`, replace the two example emails and run the two slot-assignment statements. Those two UUID-backed slots are the only identities that can upload or mutate shipment/SLA data.
-7. Copy `config.example.js` to `config.js` and set the project URL and browser-safe publishable/anon key:
+7. In Supabase **Authentication → URL Configuration → Redirect URLs**, allow `https://blaziconhp.github.io/Logisctics_control_tower/?recovery=1`. This is the return address used by the SHARV password recovery form.
+8. Copy `config.example.js` to `config.js` and set the project URL and browser-safe publishable/anon key:
 
    ```js
    window.SHARV_CONFIG = {
