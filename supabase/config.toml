@@ -1,2 +1,5 @@
 [functions.parcel-events]
 verify_jwt = false
+
+[functions.report-inbox]
+verify_jwt = false

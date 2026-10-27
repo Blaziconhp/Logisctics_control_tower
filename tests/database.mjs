@@ -332,4 +332,27 @@ if (process.env.SHARV_REPORT) {
     "PASS actual private report through PostgreSQL staging/finalize: 691 orders, 911 lines, 1819 units",
   );
 }
+
+
+await db.exec('reset role');
+await db.exec(await readFile(new URL('../supabase/migrations/20261027_report_inbox.sql',import.meta.url),'utf8'));
+await db.exec(await readFile(new URL('../supabase/migrations/20261027_report_inbox.sql',import.meta.url),'utf8'));
+await setUser(viewer);
+await fails(()=>db.query('select public.report_pending(null)'));
+await fails(()=>db.query('select public.report_import(null,null,1,1,1,\'[]\')'));
+await setUser('', 'service_role');
+const delivery=(await db.query("select public.capture_report_delivery($1,'application/json','e30=',2) id",['f'.repeat(64)])).rows[0].id;
+const reportRow={shipment_key:'order:scheduled-test',order_id:'scheduled-test',status:'Delivered',quantity:4,details:{lines:[{product:'A',quantity:2},{product:'B',quantity:2}]}};
+await fails(()=>db.query('select public.report_import($1,$2,100,50,2,$3)',[delivery,'e'.repeat(64),JSON.stringify([reportRow])]));
+await db.exec('reset role');
+await db.query("insert into storage.objects(bucket_id,name) values('shiprocket-sources',$1)",['reports/'+'e'.repeat(64)+'.gz']);
+await setUser('', 'service_role');
+await db.query('select public.report_import($1,$2,100,50,2,$3)',[delivery,'e'.repeat(64),JSON.stringify([reportRow])]);
+const duplicate=(await db.query('select public.report_import($1,$2,100,50,2,$3) result',[delivery,'e'.repeat(64),JSON.stringify([reportRow])])).rows[0].result;
+assert.equal(duplicate.already_completed,true);
+assert.equal((await db.query('select public.report_pending($1) pending',[delivery])).rows[0].pending,null);
+assert.equal(Number((await db.query("select quantity from public.next_shipments where order_id='scheduled-test'")).rows[0].quantity),4);
+assert.equal((await db.query("select current_setting('request.jwt.claim.sub',true) id")).rows[0].id,'');
+console.log('PASS scheduled report permissions, archive guard, finalization, duplicate handling and restored identity');
+
 await db.close();
