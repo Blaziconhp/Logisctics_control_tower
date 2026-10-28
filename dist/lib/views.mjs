@@ -1,4 +1,4 @@
-import { escapeHtml as e } from "./model.mjs?v=report2";
+import { escapeHtml as e } from "./model.mjs?v=report3";
 import {
   groupMetrics,
   metrics,
@@ -6,7 +6,7 @@ import {
   rawLines,
   isRto,
   ledgerColumns,
-} from "./analytics.mjs?v=report2";
+} from "./analytics.mjs?v=report3";
 export const label = (k) =>
   ({
     order_id: "Order ID",

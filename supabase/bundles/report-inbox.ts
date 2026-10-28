@@ -339,7 +339,33 @@ function importMatrices(sheetsInput) {
         groups.delete(key);
       }
     }
+    // One merchant order is one dashboard shipment. Keep its richest AWB row
+    // and fold sparse order-only records and line items into it.
+    const orderGroups = new Map();
+    for (const [key, row] of groups) {
+      const orderKey = row.order_id ? String(row.order_id).trim().toLowerCase() : key;
+      if (!orderGroups.has(orderKey)) orderGroups.set(orderKey, []);
+      orderGroups.get(orderKey).push([key, row]);
+    }
+    for (const records of orderGroups.values()) {
+      if (records.length < 2) continue;
+      records.sort((a, b) => Number(Boolean(b[1].awb)) - Number(Boolean(a[1].awb)));
+      const [targetKey, target] = records[0];
+      for (const [key, row] of records.slice(1)) {
+        target.source_refs.push(...row.source_refs);
+        target.details.lines.push(...row.details.lines);
+        target.details.additional_awbs = [...new Set([...(target.details.additional_awbs || []), row.awb].filter(Boolean))];
+        for (const field of ["courier", "customer", "recipient", "city", "state", "pincode", "payment", "warehouse", "order_date", "pickup_date", "delivered_date", "edd", "status_at", "freight", "attempts", "remark"])
+          if ((target[field] === null || target[field] === "" || target[field] === "Unknown") && row[field] !== null && row[field] !== "") target[field] = row[field];
+        groups.delete(key);
+      }
+      groups.set(targetKey, target);
+    }
     for (const row of groups.values()) {
+      row.quantity = row.details.lines.reduce(
+        (sum, line) => sum + (Number(line.quantity) || 0),
+        0,
+      );
       row.product = [
         ...new Set(row.details.lines.map((l) => l.product).filter(Boolean)),
       ].join("; ");
@@ -446,6 +472,12 @@ Deno.serve(async request => {
     }
     step='import_shipments';
     const result = await rpc('report_import',{p_delivery:delivery,p_hash:hash,p_bytes:original.length,p_compressed:zipped.length,p_source_rows:parsed.sourceRows,p_rows:parsed.rows});
+    const orderDates = parsed.rows.map((row: {order_date?: string})=>row.order_date).filter(Boolean).sort();
+    if(result?.import_id) await client.from('next_imports').update({report:{
+      origin:'shiprocket-report', delivery_id:delivery,
+      first_order_date:orderDates[0] || null,
+      latest_order_date:orderDates.at(-1) || null,
+    }}).eq('id',result.import_id);
     return reply(200,{received:true,imported:true,delivery_id:delivery,source_rows:parsed.sourceRows,shipments:parsed.rows.length,...result});
   } catch {
     if(delivery) await client.rpc('report_failed',{p_id:delivery});

@@ -2008,45 +2008,80 @@ dialog::backdrop {
 
 /* Report filters and operations analysis */
 .filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: end;
+  display: block;
   position: relative;
   z-index: 3;
+  padding: 14px;
+  border: 1px solid #dbe4ef;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #fff, #f8fafc);
+  box-shadow: 0 8px 24px #0f172a0a;
 }
-.filters > label {
-  min-width: 145px;
-  flex: 1;
+.filter-topline,
+.filter-controls,
+.active-filters,
+.date-range {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
-.filters input[type="date"] {
-  width: 100%;
+.filter-topline {
+  justify-content: space-between;
+  margin-bottom: 12px;
 }
+.filter-topline > div { display: flex; align-items: baseline; gap: 9px; }
+.filter-topline b { font-size: 13px; color: #172033; }
+.filter-topline span { font-size: 11px; color: #64748b; }
+.filter-clear { border: 0; background: transparent; color: #315fbd; font-size: 12px; padding: 4px 7px; }
+.filter-clear:disabled { color: #a0aaba; cursor: default; }
+.filter-controls { align-items: stretch; flex-wrap: wrap; }
+.date-range { min-width: 320px; padding: 7px 10px; border: 1px solid #dce3ee; border-radius: 10px; background: #fff; }
+.date-range > span { font-size: 11px; font-weight: 700; color: #455269; white-space: nowrap; }
+.date-range label { display: grid; gap: 2px; font-size: 9px; color: #7a879a; text-transform: uppercase; }
+.date-range i { color: #9aa6b7; font-style: normal; }
+.date-range input[type="date"] { min-height: 28px; border: 0; padding: 0; font-size: 12px; }
+.filter-apply { min-width: 112px; margin-left: auto; }
+.active-filters { flex-wrap: wrap; margin-top: 11px; padding-top: 11px; border-top: 1px solid #e7edf5; }
+.active-filters button { display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 5px 8px; border: 1px solid #cfdcf3; border-radius: 999px; background: #edf4ff; color: #264f9b; font-size: 11px; }
+.active-filters button span { color: #65748c; }
+.active-filters button b { font-size: 15px; line-height: 1; }
+.chart-scroll { overflow-x: auto; }
+.chart-scroll .chart-bars { min-width: 760px; }
 .multi-filter {
   position: relative;
-  min-width: 135px;
-  flex: 1;
+  min-width: 138px;
+  flex: 0 1 170px;
   border: 1px solid #dce3ee;
-  border-radius: 8px;
+  border-radius: 10px;
   background: #fff;
 }
 .multi-filter summary {
   cursor: pointer;
-  padding: 9px 12px;
+  min-height: 48px;
+  padding: 7px 11px;
   list-style: none;
   font-size: 12px;
   font-weight: 600;
   text-transform: capitalize;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  column-gap: 8px;
 }
 .multi-filter summary:after {
   content: "⌄";
-  float: right;
+  grid-column: 2;
+  grid-row: 1 / span 2;
 }
 .multi-filter summary small {
   display: block;
   color: #64748b;
   font-weight: 400;
-  margin-top: 4px;
+  margin-top: 2px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .multi-options {
   position: absolute;
@@ -2054,14 +2089,20 @@ dialog::backdrop {
   left: 0;
   z-index: 30;
   background: white;
-  width: 260px;
-  max-height: 300px;
-  overflow: auto;
+  width: 290px;
+  max-height: 360px;
+  overflow: hidden;
   border: 1px solid #dce3ee;
   box-shadow: 0 15px 35px #0f172a24;
-  border-radius: 10px;
-  padding: 12px;
+  border-radius: 14px;
+  padding: 13px;
 }
+.option-title { display: grid; gap: 2px; margin-bottom: 10px; }
+.option-title b { font-size: 13px; color: #182338; }
+.option-title small { color: #7a879a; font-size: 10px; }
+.option-search { width: 100%; margin-bottom: 7px; }
+.select-all { border-bottom: 1px solid #e7edf5; margin-bottom: 3px; font-weight: 700; }
+.option-list { max-height: 220px; overflow: auto; padding-right: 3px; }
 .multi-options label,
 .column-picker label,
 .check-label {

@@ -8,7 +8,7 @@ import {
   rawLines,
   findIdentifiers,
   day,
-} from "./lib/analytics.mjs?v=report2";
+} from "./lib/analytics.mjs?v=report3";
 import {
   label,
   table,
@@ -17,14 +17,14 @@ import {
   queueAnalysis,
   customBuilder,
   customRows,
-} from "./lib/views.mjs?v=report2";
+} from "./lib/views.mjs?v=report3";
 import { createDemoShipments } from "./lib/demo.mjs";
 import {
   escapeHtml as e,
   csv,
   TERMINAL,
   selectSourceRows,
-} from "./lib/model.mjs?v=report2";
+} from "./lib/model.mjs?v=report3";
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
 const iconPaths = {
@@ -116,6 +116,18 @@ const date = (v) =>
         year: "numeric",
       })
     : "—";
+const dateTime = (v) =>
+  v
+    ? new Date(v).toLocaleString("en-IN", {
+        timeZone: "Asia/Kolkata",
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+      })
+    : "—";
 const status = (v) =>
   `<span class="pill ${v === "Delivered" ? "delivered" : TERMINAL.has(v) ? "bad" : /ndr|undeliver|rto/i.test(v) ? "risk" : ""}">${e(v)}</span>`;
 const toast = (message) => {
@@ -202,9 +214,9 @@ async function page(filter = currentFilter(), after = 0, limit = 50) {
 function kpis(k) {
   const cards = [
     [
-      "Total shipments",
+      "Total unique orders",
       n(k.total),
-      "Distinct shipment records",
+      "Merchant order ID is the counting key",
       "shipments",
       "blue",
     ],
@@ -216,7 +228,7 @@ function kpis(k) {
       "teal",
     ],
     [
-      "Open shipments",
+      "Open orders",
       n(k.open),
       "Awaiting a terminal outcome",
       "clock",
@@ -230,7 +242,7 @@ function kpis(k) {
       "blue",
     ],
     [
-      "RTO shipments",
+      "RTO orders",
       pct(k.rto, k.total),
       `${n(k.rto)} shipments in RTO`,
       "return",
@@ -240,7 +252,7 @@ function kpis(k) {
   return `<section class="kpis" aria-label="Shipment metrics">${cards.map(([label, value, note, symbol, tone]) => `<article class="kpi ${tone}"><div class="kpi-head"><label>${label}</label><span class="kpi-icon">${icon(symbol)}</span></div><strong>${value}</strong><p><span class="metric-dot"></span>${note}</p></article>`).join("")}</section>`;
 }
 function groupTable(groups, dimension, drill = true) {
-  return `<div class="table-wrap"><table><thead><tr><th>${e(label(dimension))}</th><th>Shipments</th><th>Delivered</th><th>Delivery rate</th><th>RTO shipments</th><th>Open</th></tr></thead><tbody>${groups.map((g) => `<tr><td>${drill && ["master_courier", "courier", "state", "city", "customer", "status"].includes(dimension) && g.dimension !== "Unknown" ? `<button data-drill="${e(dimension)}" data-value="${e(g.dimension)}">${e(g.dimension)} ↗</button>` : e(g.dimension)}</td><td>${n(g.total)}</td><td>${n(g.delivered)}</td><td>${pct(g.delivered, g.total)}</td><td>${n(g.rto)}</td><td>${n(g.open)}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>${e(label(dimension))}</th><th>Unique orders</th><th>Delivered</th><th>Delivery rate</th><th>RTO orders</th><th>Open</th></tr></thead><tbody>${groups.map((g) => `<tr><td>${drill && ["master_courier", "courier", "state", "city", "customer", "status"].includes(dimension) && g.dimension !== "Unknown" ? `<button data-drill="${e(dimension)}" data-value="${e(g.dimension)}">${e(g.dimension)} ↗</button>` : e(g.dimension)}</td><td>${n(g.total)}</td><td>${n(g.delivered)}</td><td>${pct(g.delivered, g.total)}</td><td>${n(g.rto)}</td><td>${n(g.open)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 function overview(s) {
   const k = s.kpi,
@@ -266,7 +278,7 @@ function overview(s) {
         }))
       : s.months.slice(-10),
     max = Math.max(1, ...months.map((m) => m.total));
-  return `<div class="network-brief"><div class="brief-icon">${icon("spark")}</div><div><b>Your network at a glance</b><p>${n(k.total)} shipments in scope · ${n(k.exceptions)} need operational review</p></div><button data-go="exceptions">Review action queue ${icon("arrow")}</button></div>${kpis(k)}<div class="grid"><article class="card"><header class="card-head"><div><h3>Shipment volume</h3><p>${daily ? "Daily order volume · latest 31 available dates" : "Order-date volume · latest 10 available months"}</p></div><button data-export-summary="${daily ? "days" : "months"}" aria-label="Export shipment volume">↓ CSV</button></header><div class="card-body"><div class="chart-bars" role="img" aria-label="Shipment counts by order date">${months.map((m, i) => `<div class="chart-col" title="${e(m.month)}: ${n(m.total)} shipments"><b>${n(m.total)}</b><div class="bar" style="height:${Math.max(2, (125 * m.total) / max)}px"></div><small>${daily ? (i % 4 === 0 ? e(m.month) : "&nbsp;") : e(m.month)}</small></div>`).join("")}</div><p class="chart-caption">${n(k.dates_known)} of ${n(k.total)} records have an order date. Counts use the current filters.</p></div></article><article class="card"><header class="card-head"><div><h3>Delivery outcomes</h3><p>Current shipment status</p></div><button data-export-summary="outcomes" aria-label="Export delivery outcomes">↓ CSV</button></header><div class="card-body outcome"><div class="ring" style="background:conic-gradient(${stops || "#edf2ee 0% 100%"})"><div>${pct(k.delivered, k.total)}<small>DELIVERED</small></div></div><div class="legend">${s.outcomes.map((o, i) => `<p><span><i style="background:${colors[i % colors.length]}"></i>${e(o.status)}</span><b>${n(o.total)}</b></p>`).join("")}</div></div></article></div><div class="grid"><article class="card"><header class="card-head"><div><h3>Your operational brief</h3><p>Observed signals, with clear next steps</p></div><span class="badge">CURRENT SCOPE</span></header><div class="insight"><span>⚑</span><div><h3>${n(k.exceptions)} shipments need review</h3><p>Pickup pendency, forward NDR/EDD breaches, and RTO shipments.</p></div><button data-go="exceptions" aria-label="Open action queue">↗</button></div><div class="insight"><span>◷</span><div><h3>${pct(k.sla_known, k.delivered)} SLA evidence coverage</h3><p>On-time performance uses only delivered shipments with both promised and actual delivery dates. No target is guessed.</p></div></div><div class="insight"><span>↩</span><div><h3>${n(k.rto)} shipments in RTO</h3><p>${pct(k.rto, k.total)} of this scope is in RTO. A recorded return reason is needed to explain why.</p></div></div></article><article class="card"><header class="card-head"><div><h3>Carrier snapshot</h3><p>Largest carriers by shipment volume</p></div><button data-go="performance">Explore ↗</button></header>${groupTable(s.groups.slice(0, 5), "master_courier")}<div class="table-footer">Delivery rate = delivered ÷ all shipments in scope</div></article></div>`;
+  return `<div class="network-brief"><div class="brief-icon">${icon("spark")}</div><div><b>Your network at a glance</b><p>${n(k.total)} unique orders in scope · ${n(k.exceptions)} need operational review · Latest order date ${k.latest_order_date ? e(date(k.latest_order_date)) : "unavailable"}</p></div><button data-go="exceptions">Review action queue ${icon("arrow")}</button></div>${kpis(k)}<div class="grid"><article class="card"><header class="card-head"><div><h3>Shipment volume</h3><p>${daily ? "Daily unique-order volume · latest 31 available dates" : "Order-date volume · latest 10 available months"}</p></div><button data-export-summary="${daily ? "days" : "months"}" aria-label="Export shipment volume">↓ CSV</button></header><div class="card-body chart-scroll"><div class="chart-bars" role="img" aria-label="Unique order counts by order date">${months.map((m) => `<div class="chart-col" title="${e(m.month)}: ${n(m.total)} unique orders"><b>${n(m.total)}</b><div class="bar" style="height:${Math.max(2, (125 * m.total) / max)}px"></div><small>${e(m.month)}</small></div>`).join("")}</div><p class="chart-caption">${n(k.dates_known)} of ${n(k.total)} unique orders have an order date. Counts use the current filters.</p></div></article><article class="card"><header class="card-head"><div><h3>Delivery outcomes</h3><p>Current order status</p></div><button data-export-summary="outcomes" aria-label="Export delivery outcomes">↓ CSV</button></header><div class="card-body outcome"><div class="ring" style="background:conic-gradient(${stops || "#edf2ee 0% 100%"})"><div>${pct(k.delivered, k.total)}<small>DELIVERED</small></div></div><div class="legend">${s.outcomes.map((o, i) => `<p><span><i style="background:${colors[i % colors.length]}"></i>${e(o.status)}</span><b>${n(o.total)}</b></p>`).join("")}</div></div></article></div><div class="grid"><article class="card"><header class="card-head"><div><h3>Your operational brief</h3><p>Observed signals, with clear next steps</p></div><span class="badge">CURRENT SCOPE</span></header><div class="insight"><span>⚑</span><div><h3>${n(k.exceptions)} orders need review</h3><p>Pickup pendency, forward NDR/EDD breaches, and RTO orders.</p></div><button data-go="exceptions" aria-label="Open action queue">↗</button></div><div class="insight"><span>◷</span><div><h3>${pct(k.sla_known, k.delivered)} SLA evidence coverage</h3><p>On-time performance uses only delivered orders with both promised and actual delivery dates. No target is guessed.</p></div></div><div class="insight"><span>↩</span><div><h3>${n(k.rto)} orders in RTO</h3><p>${pct(k.rto, k.total)} of this scope is in RTO. A recorded return reason is needed to explain why.</p></div></div></article><article class="card"><header class="card-head"><div><h3>Carrier snapshot</h3><p>Largest carriers by unique-order volume</p></div><button data-go="performance">Explore ↗</button></header>${groupTable(s.groups.slice(0, 5), "master_courier")}<div class="table-footer">Delivery rate = delivered ÷ all unique orders in scope</div></article></div>`;
 }
 function ledger(rows) {
   const cols = [
@@ -486,8 +498,9 @@ function writeFilters(all) {
     "risk",
     "reason",
   ];
+  const active = Object.entries(state.filter).filter(([key, value]) => key !== "q" && value !== undefined && value !== "" && (!Array.isArray(value) || value.length));
   $("#filters").innerHTML =
-    `<label>Order date from<input name="from" type="date" value="${e(state.filter.from || "")}"></label><label>Order date to<input name="to" type="date" value="${e(state.filter.to || "")}"></label>${keys
+    `<div class="filter-topline"><div><b>Refine network</b><span>${active.length ? `${active.length} filter${active.length === 1 ? "" : "s"} active` : "All unique orders"}</span></div><button type="reset" class="filter-clear" ${active.length ? "" : "disabled"}>Clear all</button></div><div class="filter-controls"><div class="date-range"><span>Order date</span><label>From<input name="from" type="date" value="${e(state.filter.from || "")}"></label><i>→</i><label>To<input name="to" type="date" value="${e(state.filter.to || "")}"></label></div>${keys
       .map((k) => {
         const choices = [
           ...new Set(all.map((r) => r[k] || "Unknown")),
@@ -495,11 +508,11 @@ function writeFilters(all) {
         ].sort();
         const chosen = state.filter[k],
           isAll = chosen === undefined || chosen === "";
-        return `<details class="multi-filter" data-filter="${k}"><summary>${e(label(k))}<small>${isAll ? "All" : Array.isArray(chosen) ? chosen.length + " selected" : e(chosen)}</small></summary><div class="multi-options"><input type="search" class="option-search" placeholder="Find ${e(label(k))}" aria-label="Find ${e(label(k))}"><label><input type="checkbox" data-select-all="${k}" ${isAll ? "checked" : ""}>Select all</label>${choices.map((v) => `<label class="filter-option"><input type="checkbox" name="${k}" value="${e(v)}" ${isAll || (Array.isArray(chosen) ? chosen.includes(v) : chosen === v) ? "checked" : ""}>${e(v)}</label>`).join("")}</div></details>`;
+        return `<details class="multi-filter" data-filter="${k}"><summary><span>${e(label(k))}</span><small>${isAll ? "All" : Array.isArray(chosen) ? chosen.length + " selected" : e(chosen)}</small></summary><div class="multi-options"><div class="option-title"><b>${e(label(k))}</b><small>Choose one or more</small></div><input type="search" class="option-search" placeholder="Search ${e(label(k)).toLowerCase()}…" aria-label="Search ${e(label(k))}"><label class="select-all"><input type="checkbox" data-select-all="${k}" ${isAll ? "checked" : ""}>Select all</label><div class="option-list">${choices.map((v) => `<label class="filter-option"><input type="checkbox" name="${k}" value="${e(v)}" ${isAll || (Array.isArray(chosen) ? chosen.includes(v) : chosen === v) ? "checked" : ""}><span>${e(v)}</span></label>`).join("")}</div></div></details>`;
       })
       .join(
         "",
-      )}<button class="primary">Apply</button><button type="reset" class="text">Reset</button>`;
+      )}<button class="primary filter-apply">Apply filters</button></div>${active.length ? `<div class="active-filters">${active.map(([key, value]) => `<button type="button" data-remove-filter="${e(key)}"><span>${e(label(key))}</span>${e(Array.isArray(value) ? `${value.length} selected` : String(value))}<b>×</b></button>`).join("")}</div>` : ""}`;
 }
 function download(content, filename, type = "text/csv;charset=utf-8") {
   const url = URL.createObjectURL(
@@ -556,7 +569,7 @@ async function history() {
   if (error) throw error;
   state.imports = data;
   modal(
-    `<h2>Source files & imports</h2><p>Latest 100 imports · immutable private originals</p><div class="table-wrap"><table><thead><tr><th>File</th><th>Status</th><th>Rows</th><th>Stored size</th><th>Download</th></tr></thead><tbody>${data.map((b) => `<tr><td>${e(b.filename)}<br><small>${date(b.created_at)}</small></td><td>${e(b.status)}</td><td>${n(b.source_rows)}<br><small>${n(b.rejected_rows)} unmapped</small></td><td>${n(b.compressed_bytes / 1024)} KB<br><small>${pct(b.compressed_bytes, b.original_bytes)} of original</small></td><td><button data-source="${b.id}">Original file ↓</button>${b.status === "staging" && state.primary && b.owner_id === state.user.id ? `<button data-resume="${b.id}">Resume import</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`,
+    `<h2>Source files & imports</h2><p>Latest 100 imports · immutable private originals · India time</p><div class="table-wrap"><table><thead><tr><th>File</th><th>Import started</th><th>Imported into app</th><th>Order-date coverage</th><th>Status</th><th>Rows</th><th>Stored size</th><th>Download</th></tr></thead><tbody>${data.map((b) => `<tr><td>${e(b.filename)}<br><small>${b.report?.origin === "shiprocket-report" ? "Scheduled API report" : "Manual upload"}</small></td><td>${dateTime(b.created_at)}</td><td>${b.completed_at ? dateTime(b.completed_at) : "Pending"}</td><td>${b.report?.latest_order_date ? `${date(b.report.first_order_date)} → ${date(b.report.latest_order_date)}` : "Not recorded"}</td><td>${e(b.status)}</td><td>${n(b.source_rows)}<br><small>${n(b.rejected_rows)} unmapped</small></td><td>${n(b.compressed_bytes / 1024)} KB<br><small>${pct(b.compressed_bytes, b.original_bytes)} of original</small></td><td><button data-source="${b.id}">Original file ↓</button>${b.status === "staging" && state.primary && b.owner_id === state.user.id ? `<button data-resume="${b.id}">Resume import</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`,
   );
 }
 async function rawExport(button, selectedRows = null) {
@@ -693,7 +706,7 @@ async function parseFile(file) {
   }
   $("#importReview").innerHTML =
     '<div class="loading">Reading and compressing your report…</div>';
-  const worker = new Worker("./workers/import.js?v=report2");
+  const worker = new Worker("./workers/import.js?v=report3");
   try {
     const bytes = await file.arrayBuffer();
     const result = await new Promise((resolve, reject) => {
@@ -752,6 +765,8 @@ async function commitImport(button, resumeBatch = null) {
             mapping_version: 2,
             sheets: item.sheets,
             errors: item.errors.slice(0, 100),
+            first_order_date: item.rows.map((r) => r.order_date).filter(Boolean).sort()[0] || null,
+            latest_order_date: item.rows.map((r) => r.order_date).filter(Boolean).sort().at(-1) || null,
           },
         });
         existing.status = "staging";
@@ -777,6 +792,8 @@ async function commitImport(button, resumeBatch = null) {
               mapping_version: 2,
               sheets: item.sheets,
               errors: item.errors.slice(0, 100),
+              first_order_date: item.rows.map((r) => r.order_date).filter(Boolean).sort()[0] || null,
+              latest_order_date: item.rows.map((r) => r.order_date).filter(Boolean).sort().at(-1) || null,
             },
           })
           .select()
@@ -1185,6 +1202,13 @@ document.addEventListener("click", async (ev) => {
   const b = ev.target.closest("button");
   if (!b) return;
   try {
+    if (b.dataset.removeFilter) {
+      delete state.filter[b.dataset.removeFilter];
+      resetPage();
+      writeFilters(await dataset());
+      await render();
+      return;
+    }
     if (b.hasAttribute("data-retry")) await render();
     if (b.dataset.queue) {
       state.queue = b.dataset.queue;

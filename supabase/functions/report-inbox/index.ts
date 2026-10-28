@@ -51,6 +51,12 @@ Deno.serve(async request => {
     }
     step='import_shipments';
     const result = await rpc('report_import',{p_delivery:delivery,p_hash:hash,p_bytes:original.length,p_compressed:zipped.length,p_source_rows:parsed.sourceRows,p_rows:parsed.rows});
+    const orderDates = parsed.rows.map((row: {order_date?: string})=>row.order_date).filter(Boolean).sort();
+    if(result?.import_id) await client.from('next_imports').update({report:{
+      origin:'shiprocket-report', delivery_id:delivery,
+      first_order_date:orderDates[0] || null,
+      latest_order_date:orderDates.at(-1) || null,
+    }}).eq('id',result.import_id);
     return reply(200,{received:true,imported:true,delivery_id:delivery,source_rows:parsed.sourceRows,shipments:parsed.rows.length,...result});
   } catch {
     if(delivery) await client.rpc('report_failed',{p_id:delivery});
