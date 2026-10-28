@@ -8,7 +8,7 @@ self.onmessage = async ({ data }) => {
       cellText: true,
       raw: true,
     });
-    const { importMatrices } = await import("../lib/import-matrix.mjs?v=report4");
+    const { importMatrices } = await import("../lib/import-matrix.mjs?v=report5");
     const { rows, errors, sheets, sourceRows } = importMatrices(workbook.SheetNames.map(name => ({name, matrix: XLSX.utils.sheet_to_json(workbook.Sheets[name], {header:1,raw:true,defval:"",blankrows:true,range:0})})));
     // Archive the exact original bytes. Unknown sheets, duplicate headings, blank cells and rejected rows survive unchanged.
     const zipped = await new Response(
