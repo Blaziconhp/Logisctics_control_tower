@@ -8,7 +8,7 @@ import {
   rawLines,
   findIdentifiers,
   day,
-} from "./lib/analytics.mjs?v=report3";
+} from "./lib/analytics.mjs?v=report4";
 import {
   label,
   table,
@@ -17,14 +17,14 @@ import {
   queueAnalysis,
   customBuilder,
   customRows,
-} from "./lib/views.mjs?v=report3";
+} from "./lib/views.mjs?v=report4";
 import { createDemoShipments } from "./lib/demo.mjs";
 import {
   escapeHtml as e,
   csv,
   TERMINAL,
   selectSourceRows,
-} from "./lib/model.mjs?v=report3";
+} from "./lib/model.mjs?v=report4";
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
 const iconPaths = {
@@ -706,7 +706,7 @@ async function parseFile(file) {
   }
   $("#importReview").innerHTML =
     '<div class="loading">Reading and compressing your report…</div>';
-  const worker = new Worker("./workers/import.js?v=report3");
+  const worker = new Worker("./workers/import.js?v=report4");
   try {
     const bytes = await file.arrayBuffer();
     const result = await new Promise((resolve, reject) => {

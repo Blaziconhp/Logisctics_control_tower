@@ -1,3 +1,5 @@
+import { PIN_DIRECTORY } from "./pincode-directory.mjs";
+
 const STATES = [
   "Andaman and Nicobar Islands", "Andhra Pradesh", "Arunachal Pradesh", "Assam",
   "Bihar", "Chandigarh", "Chhattisgarh", "Dadra and Nagar Haveli and Daman and Diu",
@@ -107,8 +109,17 @@ export function cleanDestinations(rows) {
   ]));
   return rows.map((row) => {
     const pin = String(row.pincode || "").replace(/\D/g, "");
+    const official = PIN_DIRECTORY[pin];
     const rawCity = clean(row.city);
-    const city = CITY_ALIASES.get(rawCity) || preferredCity.get(pin) || (row.city ? title(row.city) : "Unknown");
-    return { ...row, pincode: pin || row.pincode, state: canonicalState(row.state, pin), city };
+    const city = official?.[0] || CITY_ALIASES.get(rawCity) || preferredCity.get(pin) || (row.city ? title(row.city) : "Unknown");
+    return {
+      ...row,
+      pincode: pin || row.pincode,
+      state: official?.[1] || canonicalState(row.state, pin),
+      city,
+      source_city: row.city || null,
+      source_state: row.state || null,
+      destination_source: official ? "India Post PIN directory" : "Uploaded report",
+    };
   });
 }
