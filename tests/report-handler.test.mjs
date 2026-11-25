@@ -7,7 +7,7 @@ test('standalone receiver authenticates, downloads, archives and imports schedul
  let handler, downloaded=0, completed=false, imported, archive;
  const token='test-only-secret-'.repeat(4);
  const csv='Order ID,AWB,Product Name,Product Quantity\n001,123456789012345678,One,2\n001,123456789012345678,Two,2';
- const client={rpc:async(name,args)=>{
+ const client={from:()=>({update:()=>({eq:async()=>({error:null})})}),rpc:async(name,args)=>{
   if(name==='capture_report_delivery')return {data:'delivery'};
   if(name==='report_pending')return {data:completed?null:{id:'delivery',body_base64:Buffer.from(JSON.stringify({report_file:'https://report-sr-mum.shiprocket.in/report.csv'})).toString('base64')}};
   if(name==='report_import'){imported=args;completed=true;return {data:{import_id:'import'}};}

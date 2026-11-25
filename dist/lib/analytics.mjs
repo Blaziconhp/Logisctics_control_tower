@@ -1,5 +1,6 @@
-import { TERMINAL } from "./model.mjs?v=report5";
-import { cleanDestinations } from "./locations.mjs?v=report5";
+import { TERMINAL } from "./model.mjs?v=status6";
+import { cleanDestinations } from "./locations.mjs?v=status6";
+import { masterStatus, effectiveStatus, pickupPending, orderAmount } from './master-status.mjs';
 export const day = (value) =>
   value && Number.isFinite(+new Date(value))
     ? new Date(+new Date(value) + 19800000).toISOString().slice(0, 10)
@@ -7,14 +8,14 @@ export const day = (value) =>
 export const dayDiff = (a, b) =>
   a && b ? Math.round((Date.parse(a) - Date.parse(b)) / 86400000) : null;
 export const isRto = (r) =>
-  /^rto\b/i.test(r.status) || Boolean(r.rto_initiated_date);
+  /^rto\b/i.test(effectiveStatus(r)) || Boolean(r.rto_initiated_date);
 export const isForward = (r) =>
   !isRto(r) &&
   !r.is_reverse &&
-  !TERMINAL.has(r.status) &&
-  r.status !== "Cancelled";
+  !TERMINAL.has(effectiveStatus(r)) &&
+  effectiveStatus(r) !== "Cancelled";
 export const transitDays = (r) =>
-  r.status === "Delivered" &&
+  effectiveStatus(r) === "Delivered" &&
   r.delivered_date &&
   r.pickup_date &&
   +new Date(r.delivered_date) >= +new Date(r.pickup_date)
@@ -24,8 +25,8 @@ const present = (value) => value !== null && value !== undefined && value !== ""
 const richness = (row) => ["awb", "provider_shipment_id", "courier", "recipient", "city", "state", "pincode", "order_date", "pickup_date", "delivered_date", "edd", "status_at"].filter((key) => present(row[key])).length;
 function canonicalOrders(rows) {
   const groups = new Map();
-  for (const row of rows) {
-    const key = row.order_id ? `order:${String(row.order_id).trim().toLowerCase()}` : row.shipment_key || `row:${row.id}`;
+  for (const [index, row] of rows.entries()) {
+    const key = row.order_id ? `order:${String(row.order_id).trim().toLowerCase()}` : row.shipment_key || `row:${row.id ?? index}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(row);
   }
@@ -75,6 +76,8 @@ export function enrich(rows, now = new Date()) {
       zone: d.zone || r.zone || "Unknown",
       month: day(r.order_date)?.slice(0, 7) || "Unknown",
     };
+    x.master_status = masterStatus(d.source_status ?? r.source_status ?? r.status);
+    x.order_amount = orderAmount(x);
     x.customer_identity =
       d.customer_email?.toLowerCase() ||
       d.customer_mobile?.replace(/\D/g, "") ||
@@ -90,12 +93,12 @@ export function enrich(rows, now = new Date()) {
         ? day(r.order_date) === day(r.pickup_date)
         : null;
     x.delivery_on_time =
-      r.status === "Delivered" && r.edd && r.delivered_date
+      effectiveStatus(x) === "Delivered" && r.edd && r.delivered_date
         ? day(r.delivered_date) <= day(r.edd)
         : null;
     x.edd_age_days =
-      isForward(x) && r.edd ? Math.max(0, dayDiff(day(now), day(r.edd))) : 0;
-    const ndr = isForward(x) && /^undelivered/i.test(r.status),
+      isForward(x) && !pickupPending(x) && r.edd ? Math.max(0, dayDiff(day(now), day(r.edd))) : 0;
+    const ndr = isForward(x) && !pickupPending(x) && /^undelivered/i.test(effectiveStatus(x)),
       breach = x.edd_age_days > 0;
     x.lm_bucket =
       ndr && breach
@@ -110,7 +113,7 @@ export function enrich(rows, now = new Date()) {
         ? "3+"
         : String(x.edd_age_days)
       : null;
-    x.fm_pending = isForward(x) && !!x.pickup_attempt_date && !r.pickup_date;
+    x.fm_pending = isForward(x) && pickupPending(x);
     x.risk =
       x.lm_bucket || x.fm_pending
         ? x.edd_age_days >= 3 || r.attempts >= 3 || (ndr && breach)
@@ -153,6 +156,7 @@ export function matches(r, f = {}) {
     return false;
   for (const k of [
     "master_courier",
+    "master_status",
     "courier",
     "city",
     "state",
@@ -226,9 +230,9 @@ export function metrics(rows) {
       .map((r) => r.sla_days)
       .filter((v) => v !== null && v !== undefined);
   const total = rows.length,
-    delivered = count((r) => r.status === "Delivered"),
+    delivered = count((r) => effectiveStatus(r) === "Delivered"),
     rto = count(isRto),
-    intransit = count((r) => isForward(r) && !!r.pickup_date);
+    intransit = count((r) => isForward(r) && !pickupPending(r) && (effectiveStatus(r) === 'Intransit' || !!r.pickup_date));
   const pickup_known = count((r) => r.pickup_on_time !== null),
     pickup_on_time = count((r) => r.pickup_on_time === true),
     sla_known = count((r) => r.delivery_on_time !== null),
@@ -239,7 +243,7 @@ export function metrics(rows) {
     delivered,
     rto,
     intransit,
-    open: count((r) => !TERMINAL.has(r.status) && r.status !== "Cancelled"),
+    open: count((r) => !TERMINAL.has(effectiveStatus(r)) && effectiveStatus(r) !== "Cancelled"),
     exceptions: count((r) => r.fm_pending || r.lm_bucket || isRto(r)),
     delivered_pct: total ? (100 * delivered) / total : null,
     rto_pct: total ? (100 * rto) / total : null,
@@ -295,12 +299,16 @@ export function summarize(rows, dimension = "master_courier") {
   return {
     kpi: metrics(rows),
     groups: groupMetrics(rows, dimension),
-    outcomes: counts("status"),
+    outcomes: counts("master_status").map(r => ({ status: r.master_status, total: r.total })),
     months: counts("month"),
     days: counts("day").slice(-31),
   };
 }
 export const ledgerColumns = [
+  "master_status",
+  "warehouse",
+  "payment",
+  "order_amount",
   "order_id",
   "awb",
   "recipient",

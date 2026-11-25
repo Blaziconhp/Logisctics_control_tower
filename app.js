@@ -8,7 +8,7 @@ import {
   rawLines,
   findIdentifiers,
   day,
-} from "./lib/analytics.mjs?v=report5";
+} from "./lib/analytics.mjs?v=status6";
 import {
   label,
   table,
@@ -17,14 +17,14 @@ import {
   queueAnalysis,
   customBuilder,
   customRows,
-} from "./lib/views.mjs?v=report5";
+} from "./lib/views.mjs?v=status6";
 import { createDemoShipments } from "./lib/demo.mjs";
 import {
   escapeHtml as e,
   csv,
   TERMINAL,
   selectSourceRows,
-} from "./lib/model.mjs?v=report5";
+} from "./lib/model.mjs?v=status6";
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
 const iconPaths = {
@@ -290,13 +290,14 @@ function ledger(rows) {
     "city",
     "state",
     "status",
+    "master_status",
     "order_date",
     "quantity",
     "attempts",
     "reason",
     "buyer_type",
     ...(state.route === "exceptions"
-      ? ["lm_bucket", "risk", "edd_age_days"]
+      ? ["warehouse", "payment", "order_amount", "lm_bucket", "risk", "edd_age_days"]
       : []),
   ];
   state.tables.ledger = rows.length
@@ -413,7 +414,7 @@ async function render() {
     state.tableSources = {};
     writeFilters(all);
     $("#queueCount").textContent = n(
-      all.filter((r) => r.fm_pending || r.lm_bucket).length,
+      metrics(all.filter((r) => matches(r, state.filter))).exceptions,
     );
     $("#scope").textContent = state.demo
       ? "DEMO · September 2026 · Synthetic data"
@@ -455,7 +456,6 @@ async function render() {
       );
       if (generation !== state.generation) return;
       state.summary = s;
-      $("#queueCount").textContent = n(s.kpi.exceptions);
       $("#updated").textContent = s.kpi.updated
         ? `Data updated ${date(s.kpi.updated)}`
         : "No imported data";
@@ -494,6 +494,7 @@ function writeFilters(all) {
     "state",
     "city",
     "status",
+    "master_status",
     "warehouse",
     "risk",
     "reason",
@@ -706,7 +707,7 @@ async function parseFile(file) {
   }
   $("#importReview").innerHTML =
     '<div class="loading">Reading and compressing your report…</div>';
-  const worker = new Worker("./workers/import.js?v=report5");
+  const worker = new Worker("./workers/import.js?v=status6");
   try {
     const bytes = await file.arrayBuffer();
     const result = await new Promise((resolve, reject) => {
